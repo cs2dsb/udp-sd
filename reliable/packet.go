@@ -16,7 +16,8 @@ type packet struct {
 	Peer *peer
 	OpCode opCode
 	Payload []byte
-	retries int
+	Retries uint32
+	RetriesUsed uint32
 	Seq uint32
 	Ack uint32
 	AckBitfield uint32
@@ -25,7 +26,7 @@ type packet struct {
 
 func (p *packet) String() string {
 	pl := len(p.Payload)
-	return fmt.Sprintf("%s from %v with %d byte payload (Ack: %d, Seq: %d, AckBitfield:%d, Retries: %d)", p.OpCode, p.Peer, pl, p.Ack, p.Seq, p.AckBitfield, p.retries)
+	return fmt.Sprintf("%s from %v with %d byte payload (Ack: %d, Seq: %d, AckBitfield:%d, Retries: %d)", p.OpCode, p.Peer, pl, p.Ack, p.Seq, p.AckBitfield, p.Retries)
 }
 
 func (op *packet) ackList() []uint32 {
@@ -48,6 +49,8 @@ func (op *packet) toBytes() *[]byte {
 		uint32ToBytes(op.Ack),
 		uint32ToBytes(op.Seq),
 		uint32ToBytes(op.AckBitfield),
+		uint32ToBytes(op.Retries),
+		uint32ToBytes(op.RetriesUsed),
 		op.Payload,
 	}
 	
@@ -82,7 +85,9 @@ func (ip encodedPacket) toOutgoingPacket() (*packet, error) {
 				binary.Size(pkt.OpCode) +
 				binary.Size(pkt.Ack) +
 				binary.Size(pkt.Seq) + 
-				binary.Size(pkt.AckBitfield)
+				binary.Size(pkt.AckBitfield) +
+				binary.Size(pkt.Retries) + 
+				binary.Size(pkt.RetriesUsed)
 	
 	p := *ip.Payload
 	if len(p) < minLength {
@@ -120,17 +125,23 @@ func (ip encodedPacket) toOutgoingPacket() (*packet, error) {
 	pkt.AckBitfield, nn = uint32FromBytes(p[n:])
 	n += nn
 	
+	pkt.Retries, nn = uint32FromBytes(p[n:])
+	n += nn
+	
+	pkt.RetriesUsed, nn = uint32FromBytes(p[n:])
+	n += nn
+	
 	buf := p[n:]
 	pkt.Payload = buf
 	
 	return &pkt, nil	
 }
 
-func newPacketWithRetries(peer *peer, payload []byte, retries int, opCode opCode) *packet {
+func newPacketWithRetries(peer *peer, payload []byte, retries uint32, opCode opCode) *packet {
 	return &packet{
 		Peer: peer,
 		Payload: payload,
-		retries: retries,
+		Retries: retries,
 		OpCode: opCode,
 	}
 }

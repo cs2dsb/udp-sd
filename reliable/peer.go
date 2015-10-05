@@ -100,7 +100,7 @@ func (p *peer) updateRemoteSeq(seq uint32) {
 func (p *peer) ackPacket(ack uint32) {
 	_, ok := p.UnAckedPackets[ack]
 	if ok {
-		log.Infof("%v acking packet with seq %d", p, ack)
+		log.Infof("%v Removing unacked packet with seq %d", p, ack)
 		delete(p.UnAckedPackets, ack)
 	}
 }

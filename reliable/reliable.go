@@ -1,6 +1,7 @@
 package reliable
 
 import (
+	"fmt"
 	"sync"
 	"net"
 	"time"
@@ -34,6 +35,7 @@ type con struct {
 	connectionTimeout time.Duration
 	packetTimeout time.Duration
 	IncomingPackets chan *packet
+	FailedOutgoingPackets chan *packet
 }
 
 func getProtocolIdBytes() *[]byte {
@@ -59,7 +61,7 @@ func uint32FromBytes(buf []byte) (uint32, int) {
 	return r, n
 }
 
-func (c *con) startListners() error {
+func (c *con) startListners(handlePackets func(incomingPackets chan *encodedPacket), dispatchPackets func()) error {
 	socket, err := net.ListenPacket("udp4", "0.0.0.0:0")
 	if err != nil {
 		log.Errorf("Error establishing packet socket: %v", err)
@@ -72,6 +74,7 @@ func (c *con) startListners() error {
 	incomingPackets := make(chan *encodedPacket)
 	c.outgoingPackets = make(chan *packet, outgoing_channel_length)
 	c.IncomingPackets = make(chan *packet)
+	c.FailedOutgoingPackets = make(chan *packet)
 	
 	go func() {
 		defer socket.Close()
@@ -108,14 +111,15 @@ func (c *con) startListners() error {
 	
 	wg.Wait()
 	
-	go c.handlePackets(incomingPackets)
-	go c.dispatchPackets()	
+	go handlePackets(incomingPackets)
+	go dispatchPackets()	
 	go c.sweepPackets()
 	
 	return nil
 }
 
 func (c *con) sweepPackets() {
+	defer close(c.FailedOutgoingPackets)
 	for c.online {
 		time.Sleep(c.packetTimeout)
 		now := time.Now()
@@ -129,33 +133,55 @@ func (c *con) sweepPackets() {
 				continue
 			}
 			
+			toQueue := make([]*packet, 0)
+			
 			for seq, pkt := range p.UnAckedPackets {
-				if now.After(pkt.timestamp.Add(p.packetTimeout)) {
+				if pkt.timestamp.Add(p.packetTimeout).After(now) {
 					continue
 				}
 				
 				delete(p.UnAckedPackets, seq)
 				
-				if pkt.retries > 0 {
-					log.Infof("Retrying %d (%d left)", seq, pkt.retries)
-					pkt.retries--					
-					c.queuePacketForSend(pkt)
+				if pkt.Retries > pkt.RetriesUsed {
+					pkt.RetriesUsed++	
+					toQueue = append(toQueue, pkt)
 				} else {
-					log.Infof("Dropping unacked packet %d", seq)
+					log.Infof("Dropping unacked packet %v", pkt)
+					select {
+						case c.FailedOutgoingPackets <- pkt:
+						default:
+							log.Warnf("No one listening to FailedOutgoingPackets channel")
+					}
 				}
 			}
+			
+			for _, pkt := range toQueue {
+				seq := pkt.Seq
+				c.queuePacketForSend(pkt)
+				log.Infof("Retrying %d as %d (%d/%d)", seq, pkt.Seq, pkt.RetriesUsed, pkt.Retries)
+			}
+			
+			blah := "unacked packets after requeue: "
+			for seq, pkt := range p.UnAckedPackets {
+				blah = blah + fmt.Sprintf("\n     %d:   %v", seq, pkt)
+			}
+			log.Infof(blah)
 		}
 	}
 }
 
 func (c *con) sendPacket(p *packet) {	
+	if p.RetriesUsed > 0 {
+		log.Infof("PACKET WITH RETRY: %v", p)
+	}
+
 	if p.Peer == nil {
 		log.Error("Packet with no peer passed to con.sendPacket")
 		return
 	}
 
 	//If it has retries or is a ping is must be reliable	
-	if p.retries > 0 || (p.OpCode & opPing == opPing) {
+	if p.Retries > 0 || (p.OpCode & opPing == opPing) {
 		p.OpCode |= opReliable		
 	}
 	//If it's an ack that's all it can be
@@ -206,6 +232,7 @@ func (c *con) dispatchPackets() {
 }
 
 func (c *con) handlePackets(incomingPackets chan *encodedPacket) {
+	defer close(c.IncomingPackets)
 	for p := range incomingPackets {
 		log.Infof("Got packet from %v", p.Peer)
 		
@@ -226,7 +253,6 @@ func (c *con) handlePackets(incomingPackets chan *encodedPacket) {
 		}		
 	}
 	log.Infof("Incoming packet channel closed, handler function exiting")
-	close(c.IncomingPackets)
 }
 
 func (c *con) FindOrAddPeer(address *net.UDPAddr) *peer {
@@ -240,7 +266,6 @@ func (c *con) FindOrAddPeer(address *net.UDPAddr) *peer {
 }
 
 func (c *con) updatePeerWithPacket(peer *peer, pkt *packet) {
-	if pkt.Seq == 8 { return }
 	peer.lastAck = time.Now()
 	
 	acks := pkt.ackList()
@@ -266,7 +291,7 @@ func waitUntilTrue(test func() bool, wait time.Duration) bool {
 
 func (c *con) ackIfNecessary(p *packet) {
 	if p.OpCode & opReliable == opReliable {		
-		log.Infof("Acking packet")
+		log.Infof("Acking packet: %v", p)
 		pkt := newPacketWithRetries(p.Peer, nil, 0, opAck)
 		pkt.Ack = p.Seq
 		c.queuePacketForSend(pkt)
@@ -305,14 +330,16 @@ func (c *con) queuePacketForSend(pkt *packet) {
 	pkt.Seq = peer.Seq
 	peer.Seq++
 	
-	peer.addUnAckedPacket(pkt)	
+	if pkt.OpCode & opAck != opAck {
+		peer.addUnAckedPacket(pkt)	
+	}
 	
 	if c.online {
 		c.outgoingPackets <- pkt
 	}
 }
 
-func (c *con) broadCastWithRetries(payload []byte, retries int, opCode opCode) {
+func (c *con) broadCastWithRetries(payload []byte, retries uint32, opCode opCode) {
 	pkt := newPacketWithRetries(nil, payload, retries, opCode)
 	
 	for _, p := range c.peers {
@@ -351,7 +378,7 @@ func newReliableConnectionWithListenerHandlers(c *con, handlePackets func(incomi
 	c.packetTimeout = default_packet_timeout
 	c.connectionTimeout = default_connection_timeout
 		
-	err := c.startListners()
+	err := c.startListners(handlePackets, dispatchPackets)
 	
 	if err != nil {
 		return nil, err

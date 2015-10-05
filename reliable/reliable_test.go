@@ -391,28 +391,41 @@ func TestDeadPeerGetsDropped(t *testing.T) {
 }
 
 func TestPacketRetrying(t *testing.T) {
-	r1 := &con{}	
+	r1, err := NewReliableConnection()
+	if err != nil {
+		t.Errorf("NewReliableConnection() returned error: %q", err)		
+	}
+	
+	r2 := &con{}	
 	
 	lossyHandler := func (incomingPackets chan *encodedPacket) {
 		innerChan := make(chan *encodedPacket)
-		go r1.handlePackets(innerChan)
+		defer close(innerChan)
+		go r2.handlePackets(innerChan)
 		
 		whoops := false
 		for p := range incomingPackets {
-			if !whoops {
-				innerChan <- p
+			pkt, err := p.toOutgoingPacket()
+			if err != nil {
+				t.Errorf("Error converting to outgoingPacket: %v", err)
+				return
 			}
-			whoops = !whoops
+			if pkt.OpCode & opData == opData{
+				i, _ := binary.Uvarint(pkt.Payload)
+				whoops = !whoops
+				if whoops {
+					t.Logf("lossy handler dropping %d: %v", i, pkt)
+					continue
+				}
+				t.Logf("lossy handler passing on %d: %v", i, pkt)
+			}
+			innerChan <- p
 		}
 	}
-	_, err := newReliableConnectionWithListenerHandlers(r1, lossyHandler, r1.dispatchPackets)
+	
+	_, err = newReliableConnectionWithListenerHandlers(r2, lossyHandler, r2.dispatchPackets)
 	if err != nil {
 		t.Errorf("newReliableConnectionWithListenerHandlers() returned error: %q", err)
-	}
-		
-	r2, err := NewReliableConnection()
-	if err != nil {
-		t.Errorf("NewReliableConnection() returned error: %q", err)		
 	}
 	
 	p := r1.ConnectPeer(&net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: r2.Port })
@@ -432,7 +445,7 @@ func TestPacketRetrying(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for pkt := range r2.IncomingPackets {		
+		for pkt := range r2.IncomingPackets {	
 			if pkt.OpCode & opData != opData {
 				continue
 			}	
@@ -457,7 +470,7 @@ func TestPacketRetrying(t *testing.T) {
 	}, p.connectionTimeout * 2)
 	
 	if !ok {
-		t.Errorf("peer had unacked packets after 2 * connection timeout")
+		t.Errorf("peer had %d unacked packets after 2 * connection timeout", len(p.UnAckedPackets))
 	}
 	
 	time.Sleep(default_packet_timeout)
@@ -467,7 +480,7 @@ func TestPacketRetrying(t *testing.T) {
 	
 	for i := uint32(0); i < n; i++ {
 		if received[i] == nil {
-			t.Errorf("Packets missing")
+			t.Errorf("Packet %d missing", i)
 		}
 	}
 }
@@ -539,7 +552,79 @@ func TestPeerSendData(t *testing.T) {
 	r2.Stop()	
 }
 
-
-
-
-
+func TestPacketsDroppedAfterRetriesExpired(t *testing.T) {
+	r1, err := NewReliableConnection()
+	if err != nil {
+		t.Errorf("NewReliableConnection() returned error: %q", err)		
+	}
+	
+	r2 := &con{}	
+	
+	gotPacketCount := uint32(0)
+	buf := []byte("Hello I'm some data")
+	
+	lossyHandler := func (incomingPackets chan *encodedPacket) {
+		innerChan := make(chan *encodedPacket)
+		defer close(innerChan)
+		go r2.handlePackets(innerChan)
+		
+		for p := range incomingPackets {
+			pkt, err := p.toOutgoingPacket()
+			if err != nil {
+				t.Errorf("Error converting to outgoingPacket: %v", err)
+				return
+			}
+			if pkt.OpCode & opData == opData && len(buf) == len(pkt.Payload){
+				same := true
+				for i, v := range buf {
+					v2 := pkt.Payload[i]
+					if v != v2 {
+						same = false
+						break
+					}
+				}
+				if same {
+					gotPacketCount++
+					continue
+				}
+			}
+			innerChan <- p
+		}
+	}
+	
+	_, err = newReliableConnectionWithListenerHandlers(r2, lossyHandler, r2.dispatchPackets)
+	if err != nil {
+		t.Errorf("newReliableConnectionWithListenerHandlers() returned error: %q", err)
+	}
+	
+	p := r1.ConnectPeer(&net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: r2.Port })
+	if p == nil {
+		t.Errorf("ConnectPeer() returned nil peer")
+	}
+	
+	isAlive := p.IsAlive(time.Millisecond * 2000)
+	if !isAlive {
+		t.Errorf("peer.IsAlive(2000ms) returned false")
+	}
+	
+	retries := uint32(4)
+	packet := newPacketWithRetries(p, buf, retries, opData)
+	r1.queuePacketForSend(packet)
+	
+	ok := waitUntilTrue(func () bool {
+		return len(p.UnAckedPackets) == 0 || gotPacketCount >= retries
+	}, p.connectionTimeout * 2)
+	
+	if !ok {
+		t.Errorf("peer had %d unacked packets after 2 * connection timeout and we didn't get the packet we were expecting the correct number of times", len(p.UnAckedPackets))
+	}
+	
+	if gotPacketCount != retries {
+		t.Errorf("We got the packet we wanted %d times, expected %d", gotPacketCount, retries)
+	}
+	
+	time.Sleep(default_packet_timeout)
+	r1.Stop()
+	r2.Stop()	
+	
+}

@@ -14,7 +14,7 @@ const (
 
 type encodedPacket struct {
 	Peer *peer
-	Payload *[]byte
+	Payload []byte
 }
 
 type packet struct {
@@ -58,7 +58,7 @@ func uint32FromBytes(buf []byte) (uint32, int) {
 	return num, 4
 }
 
-func (op *packet) toBytes() *[]byte {
+func (op *packet) toBytes() []byte {
 	fields := [][]byte {
 		uint32ToBytes(protocol_id),
 		*op.OpCode.toBytes(),
@@ -82,7 +82,7 @@ func (op *packet) toBytes() *[]byte {
 		n += copy(r[n:], f)
 	}	
 	
-	return &r
+	return r
 }
 
 func (ip encodedPacket) toOutgoingPacket() (*packet, error) {	
@@ -99,7 +99,7 @@ func (ip encodedPacket) toOutgoingPacket() (*packet, error) {
 	protId := uint32ToBytes(protocol_id)	
 	
 	
-	p := *ip.Payload
+	p := ip.Payload
 	if len(p) < header_length {
 		err := fmt.Errorf("Incoming packet payload was too small to be valid, can't reassemble")
 		log.Error(err)

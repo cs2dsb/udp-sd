@@ -17,11 +17,13 @@ type peer struct {
 	packetTimeout time.Duration
 	connectionTimeout time.Duration
 	connection conInterface
-	dispatchLevel int
 	outgoingPackets chan *packet
 	closed bool
 	done chan struct{}
+	
 	lastDispatch time.Time
+	dispatchLevel int
+	rttChan chan time.Duration
 }
 
 func NewPeer(address *net.UDPAddr, c conInterface) *peer {
@@ -34,7 +36,11 @@ func NewPeer(address *net.UDPAddr, c conInterface) *peer {
 	p.connection = c
 	p.outgoingPackets = make(chan *packet)
 	p.done = make(chan struct{})
-	p.lastAck = time.Now().Add(-keepalive_timeout)
+	p.lastAck = time.Now().Add(-keepalive_timeout)	
+	p.rttChan = make(chan time.Duration)
+	
+	go p.rttMonitor()
+	
 	return p
 }
 
@@ -127,10 +133,69 @@ func (p *peer) updateRemoteSeq(seq uint32) {
 }
 
 func (p *peer) ackPacket(ack uint32) {
-	_, ok := p.UnAckedPackets[ack]
+	pkt, ok := p.UnAckedPackets[ack]
 	if ok {
 		log.Infof("%v Removing unacked packet with seq %d", p, ack)
 		delete(p.UnAckedPackets, ack)
+		
+		p.updateRtt(pkt)
+	}
+}
+
+func (p *peer) updateRtt(pkt *packet) {
+	now := time.Now()
+	
+	rtt := now.Sub(pkt.timestamp)
+	if rtt < 0 {
+		log.Warnf("Calculated RTT < 0, this isn't possible (%v)", rtt)
+		return
+	}
+	
+	select {
+		case <- p.done:
+		case p.rttChan <- rtt:
+	}
+}
+
+func (p *peer) rttMonitor() {
+	rttList := make([]time.Duration, 0)
+		
+	for {
+		select {
+			case <- p.done:
+				return
+			case rtt := <- p.rttChan:
+				rttList = append(rttList, rtt)
+				
+				if len(rttList) < rtt_thresh_check_min_packets {
+					continue
+				}
+				if len(rttList) > rtt_thresh_check_min_packets {
+					rttList = append(rttList[:0], rttList[len(rttList) - rtt_thresh_check_min_packets:]...)
+				}
+				
+				var total time.Duration
+				for _, r := range rttList {
+					total += r
+				}
+				
+				ave := total / time.Duration(len(rttList))
+				currentInterval := p.dispatchInterval()
+				
+				if ave > rtt_thresh_high {
+					if currentInterval < dispatch_queue_quality_min {
+						p.dispatchLevel++
+						log.Infof("RTT average (%v) is too high, increasing sending delay to %v", ave, p.dispatchInterval())
+					} else {
+						log.Warnf("RTT average (%v) is too high but already at highest sending delay", ave)
+					}
+				} else if ave < rtt_thresh_low && currentInterval > dispatch_queue_quality_max {
+					p.dispatchLevel--					
+				} else {
+					log.Infof("Average RTT within bounds for current dispatch (%v): %v", ave, currentInterval)
+				}
+				
+		}
 	}
 }
 
@@ -169,7 +234,8 @@ func (p *peer) queuePacketForSend(pkt *packet) {
 }
 
 func (p *peer) dispatchInterval() time.Duration {
-	return time.Millisecond * time.Duration(dispatch_queue_quality_max + p.dispatchLevel * dispatch_queue_quality_step)
+	d := time.Duration(dispatch_queue_quality_max + time.Duration(p.dispatchLevel) * dispatch_queue_quality_step)
+	return d
 }
 
 func (p *peer) dispatch(now time.Time) {	

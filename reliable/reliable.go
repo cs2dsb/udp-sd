@@ -18,16 +18,20 @@ const (
 	tight_loop_delay = time.Millisecond * 100		
 	
 	rtt_packet_history = 10
-	rtt_thresh_high = 800
-	rtt_thresh_low = 250
+	rtt_thresh_high = time.Millisecond * 800
+	rtt_thresh_low = time.Millisecond * 250
 	rtt_thresh_check_min_packets = 5
 	
 	dispatch_queue_quality_levels = 10
-	dispatch_queue_quality_max = 1000 / 20
-	dispatch_queue_quality_min = 1000
+	dispatch_queue_quality_max = time.Millisecond * 1000 / 20
+	dispatch_queue_quality_min = time.Millisecond * 1000
 	dispatch_queue_quality_step = (dispatch_queue_quality_min - dispatch_queue_quality_max)/dispatch_queue_quality_levels
 	dispatch_queue_quality_resolution = 24
 )
+
+func init() {
+	fmt.Printf("Max dispatch: %v, Min dispatch: %v, Step: %v\n", dispatch_queue_quality_max, dispatch_queue_quality_min, dispatch_queue_quality_step)
+}
 
 var interfaces []*net.Interface
 
@@ -145,7 +149,7 @@ func (c *con) startListners(handlePackets func(incomingPackets chan *encodedPack
 			buf := make([]byte, n)
 			pkt := encodedPacket {
 				Peer: peer,
-				Payload: &buf,
+				Payload: buf,
 			}
 					
 			copy(buf, incomingBuf[0:n])
@@ -300,6 +304,13 @@ func (c *con) sendPacket(p *packet) {
 		c.Errorf("Packet with no peer passed to con.sendPacket")
 		return
 	}
+	
+	now := time.Now()
+	delay := now.Sub(p.timestamp)
+	c.Infof("Packet sat in queue for %v", delay)
+	
+	//Since we want RTT not sat in queue + RTT time
+	p.timestamp = now
 
 	//If it has retries or is a ping is must be reliable	
 	if p.Retries > 0 || (p.OpCode & opPing == opPing) {
@@ -320,7 +331,7 @@ func (c *con) sendPacket(p *packet) {
 	
 	c.connection.SetTOS(0x0)
 	c.connection.SetTTL(16)
-	_, err := c.connection.WriteTo(*buf, nil, p.Peer.Address)
+	_, err := c.connection.WriteTo(buf, nil, p.Peer.Address)
 	if err != nil {
 		c.Errorf("Error writing bytes to connection: %q", err)
 		//Do retry
@@ -347,7 +358,7 @@ func (c *con) sendKeepalives() {
 }
 
 func (c *con) dispatchPackets() {
-	tick := time.NewTicker(time.Millisecond * dispatch_queue_quality_max)
+	tick := time.NewTicker(dispatch_queue_quality_max)
 	
 	for {
 		select {

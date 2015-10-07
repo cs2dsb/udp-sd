@@ -721,3 +721,17 @@ func TestPacketsDroppedAfterRetriesExpired(t *testing.T) {
 	r2.Stop()	
 	
 }
+
+var garbage interface{}
+func BenchmarkPacketToBytes(b *testing.B) {	
+	p := NewPeer(nil, &dummyCon{})
+	pkt := newPacket(p, []byte("hello hello hello"), opData)
+	
+	var bytes []byte
+	
+	for i := 0; i < b.N; i++ {
+		bytes = pkt.toBytes()
+	}
+	
+	garbage = bytes
+}

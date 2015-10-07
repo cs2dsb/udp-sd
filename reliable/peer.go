@@ -16,7 +16,33 @@ type peer struct {
 	UnAckedPackets map[uint32]*packet
 	packetTimeout time.Duration
 	connectionTimeout time.Duration
-	connection *con
+	connection conInterface
+	dispatchLevel int
+	outgoingPackets chan *packet
+	closed bool
+	done chan struct{}
+	lastDispatch time.Time
+}
+
+func NewPeer(address *net.UDPAddr, c conInterface) *peer {
+	p := &peer{}
+	p.Address = address
+	p.Seq = 1
+	p.UnAckedPackets = make(map[uint32]*packet)
+	p.connectionTimeout = c.getConnectionTimeout()
+	p.packetTimeout = c.getPacketTimeout()
+	p.connection = c
+	p.outgoingPackets = make(chan *packet)
+	p.done = make(chan struct{})
+	p.lastAck = time.Now().Add(-keepalive_timeout)
+	return p
+}
+
+func (p *peer) Disconnect() {
+	if !p.closed {
+		p.closed = true
+		close(p.done)
+	}
 }
 
 func (p *peer) String() string {
@@ -26,8 +52,11 @@ func (p *peer) String() string {
 	return "Peer{NOADDRESS}"
 }
 
+func (p *peer) isAlive() bool {
+	return p.RemoteSeq > 0 && p.lastAck.Add(p.packetTimeout).After(time.Now())
+}
 func (p *peer) IsAlive(wait time.Duration) bool {
-	if p.lastAck.Add(p.packetTimeout).After(time.Now()) {
+	if p.isAlive() {
 		return true
 	}
 	w := time.Millisecond * 200
@@ -38,13 +67,13 @@ func (p *peer) IsAlive(wait time.Duration) bool {
 		time.Sleep(w)
 		wait -= w
 		
-		ok := p.lastAck.Add(p.packetTimeout).After(time.Now())
+		ok := p.isAlive()
 		if ok {
 			return true
 		}
 	}
 	
-	return p.lastAck.Add(p.packetTimeout).After(time.Now())
+	return p.isAlive()
 }
 
 func (p *peer) waitForAck(seq uint32, wait time.Duration) bool {
@@ -115,5 +144,71 @@ func (p *peer) addUnAckedPacket(pkt *packet) {
 
 func (p *peer) SendData(payload []byte) {
 	packet := newPacket(p, payload, opData)
-	p.connection.queuePacketForSend(packet)
+	p.queuePacketForSend(packet)
 }
+
+func (p *peer) queuePacketForSend(pkt *packet) {
+	if pkt == nil {
+		log.Warningf("peer.queuePacketForSend got passed a nil packet")
+		return
+	}
+	
+	pkt.timestamp = time.Now()
+	
+	pkt.Seq = p.Seq
+	p.Seq++
+	
+	if pkt.OpCode & opAck != opAck {
+		p.addUnAckedPacket(pkt)	
+	}
+	
+	select {
+		case <- p.done:
+		case p.outgoingPackets <- pkt:
+	}	
+}
+
+func (p *peer) dispatchInterval() time.Duration {
+	return time.Millisecond * time.Duration(dispatch_queue_quality_max + p.dispatchLevel * dispatch_queue_quality_step)
+}
+
+func (p *peer) dispatch(now time.Time) {	
+	if p.lastDispatch.Add(p.dispatchInterval()).After(now) {
+		return
+	}
+	
+	var pkt *packet
+	select {
+		case pkt = <- p.outgoingPackets:
+		default:		
+			return
+	}
+	
+	if pkt == nil {
+		return
+	}
+	
+	p.lastDispatch = now
+	p.connection.sendPacket(pkt)
+}
+
+func (p *peer) keepalive(now time.Time) {
+	if p.lastDispatch.Add(keepalive_timeout).After(now) {
+		return
+	}
+	p.connection.sendKeepaliveToPeer(p)
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+

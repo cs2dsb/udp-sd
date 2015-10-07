@@ -5,104 +5,149 @@ import (
 	"sync"
 	"net"
 	"time"
-	"encoding/binary"
 	"golang.org/x/net/ipv4"
-	log "github.com/Sirupsen/logrus"
+	"github.com/Sirupsen/logrus"
 )
 
 const (
-	outgoing_channel_length = 10
-	keepalive_timeout = time.Second * 10
-	default_retries = 5
-	protocol_id = 234545346
+	keepalive_timeout = time.Second * 5
+	default_retries = 5	
 	default_packet_timeout = time.Millisecond * 800
 	default_connection_timeout = time.Millisecond * 10000
 	incoming_buffer_length = 64*1024	
 	tight_loop_delay = time.Millisecond * 100		
+	
+	rtt_packet_history = 10
+	rtt_thresh_high = 800
+	rtt_thresh_low = 250
+	rtt_thresh_check_min_packets = 5
+	
+	dispatch_queue_quality_levels = 10
+	dispatch_queue_quality_max = 1000 / 20
+	dispatch_queue_quality_min = 1000
+	dispatch_queue_quality_step = (dispatch_queue_quality_min - dispatch_queue_quality_max)/dispatch_queue_quality_levels
+	dispatch_queue_quality_resolution = 24
 )
 
 var interfaces []*net.Interface
-var protocolIdBytes []byte
 
 type con struct {
-	online bool	
+	done chan struct{}	
+	online AtomicBool
 	Port int
 	connection *ipv4.PacketConn
 	interfaces []*net.Interface	
 	keepalive bool
-	outgoingPackets chan *packet
-	peers []*peer
 	connectionTimeout time.Duration
 	packetTimeout time.Duration
 	IncomingPackets chan *packet
 	FailedOutgoingPackets chan *packet
+	findOrAddPeer chan *findPeerRequest
+	removePeer chan *peer	
+	enumeratePeers chan *enumeratePeersRequest
+	listenAddress *net.UDPAddr
 }
 
-func getProtocolIdBytes() *[]byte {
-	if len(protocolIdBytes) == 0 {
-		pid := uint32(protocol_id)
-		protocolIdBytes = make([]byte, binary.Size(pid))
-		binary.PutUvarint(protocolIdBytes, uint64(pid))
-	}
-	return &protocolIdBytes
+type conInterface interface {
+	sendPacket(p *packet)
+	sendKeepaliveToPeer(p *peer)
+	getConnectionTimeout() time.Duration
+	getPacketTimeout() time.Duration
 }
 
-func uint32ToBytes(num uint32) []byte {
-	buf := make([]byte, binary.Size(num))
-	binary.PutUvarint(buf, uint64(num))
-	return buf
+func (c *con) getConnectionTimeout() time.Duration {
+	return c.connectionTimeout
 }
 
-func uint32FromBytes(buf []byte) (uint32, int) {
-	var r uint32
-	n := binary.Size(r)
-	r64, _ := binary.Uvarint(buf[0:n])
-	r = uint32(r64)
-	return r, n
+func (c *con) getPacketTimeout() time.Duration {
+	return c.packetTimeout
+}
+
+func (c *con) String() string {
+	return fmt.Sprintf("con{%v:%d}", c.listenAddress.IP, c.listenAddress.Port)
+}
+
+func (con *con) Errorf(fmt string, args ...interface{}) {
+	logrus.WithField("reliable-connection", con).Errorf(fmt, args...)
+}
+
+func (con *con) Infof(fmt string, args ...interface{}) {
+	logrus.WithField("reliable-connection", con).Infof(fmt, args...)
+}
+
+func (con *con) Warnf(fmt string, args ...interface{}) {
+	logrus.WithField("reliable-connection", con).Warnf(fmt, args...)
+}
+
+type findPeerRequest struct {
+	Address *net.UDPAddr
+	RespChan chan *peer
+}
+
+type enumeratePeersRequest struct {
+	RespChan chan *peer
+	AbortChan chan struct{}
 }
 
 func (c *con) startListners(handlePackets func(incomingPackets chan *encodedPacket), dispatchPackets func()) error {
 	socket, err := net.ListenPacket("udp4", "0.0.0.0:0")
 	if err != nil {
-		log.Errorf("Error establishing packet socket: %v", err)
+		c.Errorf("Error establishing packet socket: %v", err)
 		return err
 	}
+	
+	c.listenAddress = socket.LocalAddr().(*net.UDPAddr)
 
 	var wg sync.WaitGroup 
 	wg.Add(1)
 	
 	incomingPackets := make(chan *encodedPacket)
-	c.outgoingPackets = make(chan *packet, outgoing_channel_length)
 	c.IncomingPackets = make(chan *packet)
 	c.FailedOutgoingPackets = make(chan *packet)
+	c.removePeer = make(chan *peer)
+	c.enumeratePeers = make(chan *enumeratePeersRequest)
+	c.findOrAddPeer = make(chan *findPeerRequest)
+	c.done = make(chan struct{})
 	
 	go func() {
 		defer socket.Close()
 		defer close(incomingPackets)
-		defer close(c.outgoingPackets)
 		
 		c.connection = ipv4.NewPacketConn(socket)
-		c.Port = socket.LocalAddr().(*net.UDPAddr).Port
-		c.online = true
+		c.Port = c.listenAddress.Port
 		
 		wg.Done()
 		
 		incomingBuf := make([]byte, incoming_buffer_length)
-		for c.online {
-			time.Sleep(tight_loop_delay)
-			
+		for c.online.Get() {
+			time.Sleep(tight_loop_delay)			
 			n, _, src, err := c.connection.ReadFrom(incomingBuf)
+			
 			if err != nil {
-				log.Errorf("Error reading from connection: %q", err)
-				continue
+				if c.online.Get() {
+					c.Errorf("Error reading from connection: %q", err)
+					continue
+				} else {
+					break
+				}
+			}
+			
+			peer := c.FindOrAddPeer(src.(*net.UDPAddr))
+			if peer == nil {
+				if c.online.Get() {
+					c.Errorf("Nil peer was returned but we're still online", err)
+					continue
+				} else {
+					break
+				}
 			}
 			
 			buf := make([]byte, n)
-			peer := c.FindOrAddPeer(src.(*net.UDPAddr))
 			pkt := encodedPacket {
 				Peer: peer,
 				Payload: &buf,
-			}		
+			}
+					
 			copy(buf, incomingBuf[0:n])
 			
 			incomingPackets <- &pkt
@@ -114,22 +159,108 @@ func (c *con) startListners(handlePackets func(incomingPackets chan *encodedPack
 	go handlePackets(incomingPackets)
 	go dispatchPackets()	
 	go c.sweepPackets()
+	go c.peerManager()
+	go c.sendKeepalives()
 	
 	return nil
 }
 
+func (c *con) peerManager() {
+	peers := make([]*peer, 0)
+			
+	go func() {
+		for c.online.Get() {
+			select {
+				case <- c.done:
+				case pa := <- c.findOrAddPeer:
+					found := false				
+					for _, op := range peers {
+						if pa.Address.IP.Equal(op.Address.IP) && pa.Address.Port == op.Address.Port {
+							pa.RespChan <- op
+							found = true
+							break
+						}
+					}
+					if !found {
+						p := NewPeer(pa.Address, c)
+						peers = append(peers, p)
+						c.Infof("Adding peer: %v", p)	
+						pa.RespChan <- p
+					}
+					close(pa.RespChan)
+			}
+		}
+	}()
+	
+	go func() {
+		for c.online.Get() {
+			select {
+				case <- c.done:
+				case p := <- c.removePeer:
+					for i, op := range peers {
+						if p.Address.IP.Equal(op.Address.IP) && p.Address.Port == op.Address.Port {
+							op.Disconnect()
+							c.Infof("Removing peer: %v", op)
+							peers = append(peers[:i], peers[i+1:]...)
+							continue
+						}
+					}
+			}
+		}
+	}()
+	
+	go func() {
+		for c.online.Get() {
+			select {
+				case <- c.done:
+				case ep := <- c.enumeratePeers:
+					//c.Infof("Enumerating peers: %v", c)
+					func() {
+						defer close(ep.RespChan)
+						for _, p := range peers {
+							//c.Infof("Enumerate sending peer: %v", p)
+							select {
+								case ep.RespChan <- p:
+								case <- ep.AbortChan:							
+									return
+							}
+						}
+					}()
+			}
+		}
+	}()
+}
+
+func (c *con) getEnumeratePeersChan() *enumeratePeersRequest {
+	req := &enumeratePeersRequest {
+		RespChan: make(chan *peer),
+		AbortChan: make(chan struct{}),
+	}
+	
+	select {
+		case <- c.done:
+		case c.enumeratePeers <- req:		
+			return req
+	}
+	
+	if !c.online.Get() {
+		close(req.RespChan)
+	}
+	
+	return req
+}
+
 func (c *con) sweepPackets() {
 	defer close(c.FailedOutgoingPackets)
-	for c.online {
+	for c.online.Get() {		
 		time.Sleep(c.packetTimeout)
 		now := time.Now()
 		
-		for pi := len(c.peers) - 1; pi >= 0; pi -- {
-			p := c.peers[pi]
-			
+		enumReq := c.getEnumeratePeersChan()
+		for p := range enumReq.RespChan {
 			if time.Now().After(p.lastAck.Add(p.connectionTimeout)) {
-				log.Infof("%v idle, removing", p)
-				c.peers = append(c.peers[:pi], c.peers[pi+1:]...)
+				c.Infof("%v idle, removing", p)				
+				c.RemovePeer(p)
 				continue
 			}
 			
@@ -146,11 +277,11 @@ func (c *con) sweepPackets() {
 					pkt.RetriesUsed++	
 					toQueue = append(toQueue, pkt)
 				} else {
-					log.Infof("Dropping unacked packet %v", pkt)
+					c.Infof("Dropping unacked packet %v", pkt)
 					select {
 						case c.FailedOutgoingPackets <- pkt:
 						default:
-							log.Warnf("No one listening to FailedOutgoingPackets channel")
+							c.Warnf("No one listening to FailedOutgoingPackets channel")
 					}
 				}
 			}
@@ -158,25 +289,15 @@ func (c *con) sweepPackets() {
 			for _, pkt := range toQueue {
 				seq := pkt.Seq
 				c.queuePacketForSend(pkt)
-				log.Infof("Retrying %d as %d (%d/%d)", seq, pkt.Seq, pkt.RetriesUsed, pkt.Retries)
+				c.Infof("Retrying %d as %d (%d/%d)", seq, pkt.Seq, pkt.RetriesUsed, pkt.Retries)
 			}
-			
-			blah := "unacked packets after requeue: "
-			for seq, pkt := range p.UnAckedPackets {
-				blah = blah + fmt.Sprintf("\n     %d:   %v", seq, pkt)
-			}
-			log.Infof(blah)
 		}
 	}
 }
 
 func (c *con) sendPacket(p *packet) {	
-	if p.RetriesUsed > 0 {
-		log.Infof("PACKET WITH RETRY: %v", p)
-	}
-
 	if p.Peer == nil {
-		log.Error("Packet with no peer passed to con.sendPacket")
+		c.Errorf("Packet with no peer passed to con.sendPacket")
 		return
 	}
 
@@ -193,7 +314,7 @@ func (c *con) sendPacket(p *packet) {
 	
 	buf := p.toBytes()
 	if buf == nil {
-		log.Error("outgoingPacket.ToBytes() returned nil in con.sendPacket, nothing to send")
+		c.Errorf("outgoingPacket.ToBytes() returned nil in con.sendPacket, nothing to send")
 		return
 	}
 	
@@ -201,68 +322,74 @@ func (c *con) sendPacket(p *packet) {
 	c.connection.SetTTL(16)
 	_, err := c.connection.WriteTo(*buf, nil, p.Peer.Address)
 	if err != nil {
-		log.Errorf("Error writing bytes to connection: %q", err)
+		c.Errorf("Error writing bytes to connection: %q", err)
 		//Do retry
 		return
 	}
-	log.Infof("Sent packet to %v", p.Peer)	
+	c.Infof("Sent packet %v", p)	
+}
+
+func (c *con) sendKeepalives() {
+	tick := time.NewTicker(time.Millisecond * 500)
+	for {
+		select {
+			case <- c.done:
+				return 
+			default:
+		}
+		
+		now := <- tick.C
+		enumReq := c.getEnumeratePeersChan()
+		for p := range enumReq.RespChan {
+			p.keepalive(now)
+		}
+	}
 }
 
 func (c *con) dispatchPackets() {
-	var lastSend time.Time //Zero so if keepalive is on it starts right away
-	tick := time.NewTicker(time.Millisecond * 500)
+	tick := time.NewTicker(time.Millisecond * dispatch_queue_quality_max)
 	
 	for {
 		select {
-			case p, ok := <- c.outgoingPackets:
-				if !ok {
-					log.Infof("Outgoing packet channel closed, handler function exiting")
-					return
-				}
-				lastSend = time.Now()
-				c.sendPacket(p)	
-			case <- tick.C:			
-				if c.keepalive && time.Now().After(lastSend.Add(keepalive_timeout)) {
-					lastSend = time.Now()
-					c.sendKeepalive()
+			case <- c.done:
+				return 
+			case now := <- tick.C:		
+				enumReq := c.getEnumeratePeersChan()
+				for p := range enumReq.RespChan {
+					p.dispatch(now)
 				}
 		}	
 		
+	}
+
+	enumReq := c.getEnumeratePeersChan()
+	for p := range enumReq.RespChan {
+		c.removePeer <- p
 	}
 }
 
 func (c *con) handlePackets(incomingPackets chan *encodedPacket) {
 	defer close(c.IncomingPackets)
 	for p := range incomingPackets {
-		log.Infof("Got packet from %v", p.Peer)
-		
 		pkt, err := p.toOutgoingPacket()
 		if err != nil {
-			log.Errorf("Error reassembling packet from incoming bytes: %q", err)
+			c.Errorf("Error reassembling packet from incoming bytes: %q", err)
 			continue
 		}
 		
-		log.Infof("Reassembled packet: %v", pkt)
+		c.Infof("Reassembled packet: %v", pkt)
 		c.ackIfNecessary(pkt)
 		c.updatePeerWithPacket(pkt.Peer, pkt)
 		
-		select {
-			case c.IncomingPackets <- pkt:
-			default:
-				log.Warnf("No one listening on IncomingPackets channel, throwing packets away")
-		}		
-	}
-	log.Infof("Incoming packet channel closed, handler function exiting")
-}
-
-func (c *con) FindOrAddPeer(address *net.UDPAddr) *peer {
-	for _, p := range c.peers {
-		if p.Address.IP.Equal(address.IP) && p.Address.Port == address.Port {
-			return p
+		if pkt.OpCode & opData == opData {
+			select {
+				case c.IncomingPackets <- pkt:
+				default:
+					c.Warnf("No one listening on IncomingPackets channel, throwing packets away")
+			}		
 		}
 	}
-	
-	return c.ConnectPeer(address)	
+	c.Infof("Incoming packet channel closed, handler function exiting")
 }
 
 func (c *con) updatePeerWithPacket(peer *peer, pkt *packet) {
@@ -291,58 +418,52 @@ func waitUntilTrue(test func() bool, wait time.Duration) bool {
 
 func (c *con) ackIfNecessary(p *packet) {
 	if p.OpCode & opReliable == opReliable {		
-		log.Infof("Acking packet: %v", p)
+		c.Infof("Acking packet: %v", p)
 		pkt := newPacketWithRetries(p.Peer, nil, 0, opAck)
 		pkt.Ack = p.Seq
 		c.queuePacketForSend(pkt)
 	}
 }
 
-func (c *con) addPeer(p *peer) {	
-	for _, op := range c.peers {
-		if p.Address.IP.Equal(op.Address.IP) && p.Address.Port == op.Address.Port {
-			log.Infof("Peer at %v:%d already exists", p.Address.IP, p.Address.Port)
-			return
-		}
+func (c *con) FindOrAddPeer(address *net.UDPAddr) *peer {
+	resp := make(chan *peer)
+	
+	if !c.online.Get() {
+		return nil
 	}
 	
-	log.Infof("Added a new peer at %v:%d", p.Address.IP, p.Address.Port)
-	c.peers = append(c.peers, p)
-	c.sendKeepaliveToPeer(p)	
-}
-
-func (c *con) ConnectPeer(address *net.UDPAddr) *peer {
-	p := &peer{}
-	p.Address = address
-	p.Seq = 1
-	p.UnAckedPackets = make(map[uint32]*packet)
-	p.connectionTimeout = c.connectionTimeout
-	p.packetTimeout = c.packetTimeout
-	p.connection = c
-	c.addPeer(p)	
+	select {
+		case <- c.done:
+		case c.findOrAddPeer <- &findPeerRequest{
+				Address: address,
+				RespChan: resp,
+			}:
+	}
+	
+	if !c.online.Get() {
+		return nil
+	}
+	
+	p := <- resp
 	return p
 }
 
+func (c *con) RemovePeer(p *peer) {
+	select {
+		case <- c.done:		
+		case c.removePeer <- p:
+	}
+}
+
 func (c *con) queuePacketForSend(pkt *packet) {
-	pkt.timestamp = time.Now()
-	
-	peer := pkt.Peer
-	pkt.Seq = peer.Seq
-	peer.Seq++
-	
-	if pkt.OpCode & opAck != opAck {
-		peer.addUnAckedPacket(pkt)	
-	}
-	
-	if c.online {
-		c.outgoingPackets <- pkt
-	}
+	pkt.Peer.queuePacketForSend(pkt)
 }
 
 func (c *con) broadCastWithRetries(payload []byte, retries uint32, opCode opCode) {
 	pkt := newPacketWithRetries(nil, payload, retries, opCode)
-	
-	for _, p := range c.peers {
+
+	enumReq := c.getEnumeratePeersChan()
+	for p := range enumReq.RespChan {		
 		pkt.Peer = p
 		c.queuePacketForSend(pkt)
 	}
@@ -353,30 +474,37 @@ func (c *con) BroadCast(payload []byte) {
 }
 
 func (c *con) sendKeepalive() {
-	log.Infof("Sending a keepalive to %d peers", len(c.peers))
-	for _, p := range c.peers {
+	enumReq := c.getEnumeratePeersChan()
+	for p := range enumReq.RespChan {
 		c.sendKeepaliveToPeer(p)
 	}
 }
 
 func (c *con) sendKeepaliveToPeer(p *peer) {
+	c.Infof("Sending keepalive to %v", p)
 	pkt := newPacketWithRetries(p, nil, 0, opPing)
 	c.queuePacketForSend(pkt)	
 }
 
-func (c *con) EnableKeepalive() {
-	c.keepalive = true
+func (c *con) EnableKeepalive(on bool) {
+	c.keepalive = on
 }
 
 func (c *con) Stop() {
-	c.online = false
+	c.Infof("Reliable connection (%v) stopping", c)
+	
+	c.online.Set(false)
+	//Aborts any sends to peer channels
+	close(c.done)	
+	
 	c.connection.SetReadDeadline(time.Now())
 }
 
-func newReliableConnectionWithListenerHandlers(c *con, handlePackets func(incomingPackets chan *encodedPacket), dispatchPackets func()) (*con, error) {
-	c.peers = make([]*peer, 0)
+func newReliableConnectionWithListenerHandlers(c *con, handlePackets func(incomingPackets chan *encodedPacket), dispatchPackets func()) (*con, error) {	
+	c.online.Set(true)
+	c.keepalive = true
 	c.packetTimeout = default_packet_timeout
-	c.connectionTimeout = default_connection_timeout
+	c.connectionTimeout = default_connection_timeout	
 		
 	err := c.startListners(handlePackets, dispatchPackets)
 	
@@ -384,7 +512,8 @@ func newReliableConnectionWithListenerHandlers(c *con, handlePackets func(incomi
 		return nil, err
 	}
 	
-	log.Infof("New reliable connection running on port %d", c.Port)
+	c.Infof("New reliable connection running on port %d", c.Port)	
+	
 	
 	return c, nil
 }

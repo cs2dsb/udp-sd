@@ -2,9 +2,14 @@ package reliable
 
 import (
 	"fmt"
-	"time"
 	"encoding/binary"
+	"time"
 	log "github.com/Sirupsen/logrus"
+)
+
+const (
+	protocol_id = uint32(234545346)
+	header_length = 4 + 1 + 4 * 5 //protocol_id, opcode, retries, retries used, ack, seq and ackbitfield
 )
 
 type encodedPacket struct {
@@ -42,9 +47,20 @@ func (op *packet) ackList() []uint32 {
 	return list
 }
 
+func uint32ToBytes(num uint32) []byte {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, num)
+	return buf
+}
+
+func uint32FromBytes(buf []byte) (uint32, int) {
+	num := binary.BigEndian.Uint32(buf)
+	return num, 4
+}
+
 func (op *packet) toBytes() *[]byte {
 	fields := [][]byte {
-		*getProtocolIdBytes(),
+		uint32ToBytes(protocol_id),
 		*op.OpCode.toBytes(),
 		uint32ToBytes(op.Ack),
 		uint32ToBytes(op.Seq),
@@ -80,17 +96,11 @@ func (ip encodedPacket) toOutgoingPacket() (*packet, error) {
 		Peer: ip.Peer,
 	}
 	
-	protId := *getProtocolIdBytes()	
-	minLength := len(protId) + 
-				binary.Size(pkt.OpCode) +
-				binary.Size(pkt.Ack) +
-				binary.Size(pkt.Seq) + 
-				binary.Size(pkt.AckBitfield) +
-				binary.Size(pkt.Retries) + 
-				binary.Size(pkt.RetriesUsed)
+	protId := uint32ToBytes(protocol_id)	
+	
 	
 	p := *ip.Payload
-	if len(p) < minLength {
+	if len(p) < header_length {
 		err := fmt.Errorf("Incoming packet payload was too small to be valid, can't reassemble")
 		log.Error(err)
 		return nil, err

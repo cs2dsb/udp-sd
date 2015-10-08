@@ -38,6 +38,7 @@ func NewPeer(address *net.UDPAddr, c conInterface) *peer {
 	p.done = make(chan struct{})
 	p.lastAck = time.Now().Add(-keepalive_timeout)	
 	p.rttChan = make(chan time.Duration)
+	p.dispatchLevel = dispatch_quality_default_level
 	
 	go p.rttMonitor()
 	
@@ -57,6 +58,18 @@ func (p *peer) String() string {
 	} 
 	return "Peer{NOADDRESS}"
 }
+
+func (p *peer) updatePeerWithPacket(pkt *packet) {
+	p.lastAck = time.Now()
+		
+	acks := pkt.ackList()
+	for _, a := range acks {
+		p.ackPacket(a)
+	}
+	
+	p.updateRemoteSeq(pkt.Seq)
+}
+
 
 func (p *peer) isAlive() bool {
 	return p.RemoteSeq > 0 && p.lastAck.Add(p.packetTimeout).After(time.Now())
@@ -135,7 +148,7 @@ func (p *peer) updateRemoteSeq(seq uint32) {
 func (p *peer) ackPacket(ack uint32) {
 	pkt, ok := p.UnAckedPackets[ack]
 	if ok {
-		log.Infof("%v Removing unacked packet with seq %d", p, ack)
+		log.Infof("%v Packet with seq %d achnowledged", p, ack)
 		delete(p.UnAckedPackets, ack)
 		
 		p.updateRtt(pkt)
@@ -183,16 +196,18 @@ func (p *peer) rttMonitor() {
 				currentInterval := p.dispatchInterval()
 				
 				if ave > rtt_thresh_high {
-					if currentInterval < dispatch_queue_quality_min {
+					if currentInterval < dispatch_quality_min {
 						p.dispatchLevel++
+						rttList = make([]time.Duration, 0)			
 						log.Infof("RTT average (%v) is too high, increasing sending delay to %v", ave, p.dispatchInterval())
 					} else {
 						log.Warnf("RTT average (%v) is too high but already at highest sending delay", ave)
 					}
-				} else if ave < rtt_thresh_low && currentInterval > dispatch_queue_quality_max {
-					p.dispatchLevel--					
+				} else if ave < rtt_thresh_low && currentInterval > dispatch_quality_max {
+					p.dispatchLevel--		
+					rttList = make([]time.Duration, 0)			
 				} else {
-					log.Infof("Average RTT within bounds for current dispatch (%v): %v", ave, currentInterval)
+					log.Infof("RTT average (%v) within bounds for current dispatch: %v", ave, currentInterval)
 				}
 				
 		}
@@ -234,7 +249,7 @@ func (p *peer) queuePacketForSend(pkt *packet) {
 }
 
 func (p *peer) dispatchInterval() time.Duration {
-	d := time.Duration(dispatch_queue_quality_max + time.Duration(p.dispatchLevel) * dispatch_queue_quality_step)
+	d := time.Duration(dispatch_quality_max + time.Duration(p.dispatchLevel) * dispatch_quality_step)
 	return d
 }
 

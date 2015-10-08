@@ -1,16 +1,82 @@
 package main
 
 import (
-	"udp-sd/sd"
+	"runtime"
 	"fmt"
-	"sync"
-	"math/rand"
 	"time"
-	"udp-sd/reliable"
+	"github.com/cs2dsb/udp-sd/reliable"
 	"net"
 )
 
 func main() {
+	fmt.Printf("GoMaxProcs: %d\n", runtime.GOMAXPROCS(0))
+	/*addr := &net.UDPAddr{
+        Port: 59229,
+        IP: net.ParseIP("127.0.0.1"),
+    }
+    conn, err := net.ListenUDP("udp", addr)
+    defer conn.Close()
+    if err != nil {
+        panic(err)
+    }
+	
+	addr2 := &net.UDPAddr{
+        Port: 59230,
+        IP: net.ParseIP("127.0.0.1"),
+    }
+	//conn2, err := net.DialUDP("udp", addr2, addr)
+	conn2, err := net.ListenUDP("udp", addr2)
+    defer conn2.Close()
+    if err != nil {
+        panic(err)
+    }
+	
+	go func() {
+		incomingBuf := make([]byte, 1500)
+		for {
+			n, _, err := conn.ReadFromUDP(incomingBuf)			
+			if err != nil {
+				panic(err)
+			}
+			//fmt.Printf("Got data")
+			conn.WriteToUDP(incomingBuf[:n], addr)
+		}
+	}()
+	
+	data := []byte("Abjkfdjskljdklfjdskljdskljfklds")
+	incomingBuf := make([]byte, 1500)
+	var rttTot time.Duration
+	rttCount := 0
+	
+	go func() {
+		for {
+			<- time.After(time.Second * 2)
+			rttAve := time.Duration(-1)
+			if rttCount > 0 {
+				rttAve = rttTot / time.Duration(rttCount)
+			}
+			fmt.Printf("Rtt Average: %v\n", rttAve)
+		}
+	}()
+	
+	for {
+		start := time.Now()
+		_, err := conn2.WriteTo(data, addr)
+		//fmt.Printf("Wrote %d bytes\n", i)
+		if err != nil {
+			panic(err)
+		}
+		
+		_, _, err = conn.ReadFromUDP(incomingBuf)			
+		if err != nil {
+			panic(err)
+		}
+		end := time.Now()
+		rttTot += end.Sub(start)
+		rttCount ++
+	}
+	
+	return*/
 	r1, err := reliable.NewReliableConnection()
 	if err != nil {
 		fmt.Errorf("NewReliableConnection() returned error: %q", err)
@@ -27,7 +93,7 @@ func main() {
 		fmt.Errorf("NewReliableConnection() returned nil connection")
 	}
 	
-	p := r1.ConnectPeer(&net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: r2.Port })
+	p := r1.FindOrAddPeer(&net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: r2.Port })
 	if p == nil {
 		fmt.Errorf("ConnectPeer() returned nil peer")
 	}
@@ -36,47 +102,6 @@ func main() {
 	if !isAlive {
 		fmt.Errorf("peer.IsAlive(2000ms) returned false")
 	}	
-	r1.EnableKeepalive()
 	
-	select{}
-	return
-	services := []sd.Service{
-		sd.Service { Name: "a", RequiredServices: []string{} },
-		/*sd.Service { Name: "b", RequiredServices: []string{ "a" } },
-		sd.Service { Name: "c", RequiredServices: []string{ "a" } },
-		sd.Service { Name: "d", RequiredServices: []string{ "a", "c" } },
-		sd.Service { Name: "e", RequiredServices: []string{ "b" } },
-		sd.Service { Name: "f", RequiredServices: []string{ "b" } },
-		sd.Service { Name: "g", RequiredServices: []string{ "b" } },
-		sd.Service { Name: "h", RequiredServices: []string{ "b", "c" } },
-		sd.Service { Name: "i", RequiredServices: []string{ "e", "f" } },
-		sd.Service { Name: "j", RequiredServices: []string{ "c",  "d"  } },
-		sd.Service { Name: "k", RequiredServices: []string{ "i", "g", "h", "j" } },		*/
-	}
-	
-	var wg sync.WaitGroup
-	wg.Add(len(services))
-	
-	for _, s := range services {
-		go func(s sd.Service) {
-			jitter := time.Microsecond * time.Duration(rand.Float64() * 10000.0)
-			time.Sleep(jitter)
-			err := s.BringOnline()
-			if err != nil {
-				panic(err)
-			}
-			err = s.WaitForOnline()
-			if err != nil {
-				panic(err)
-			}
-			fmt.Printf("Service '%s' came online\n", s.Name)
-			wg.Done()
-		}(s)
-	}
-	
-	fmt.Println("Waiting for services to come online")
-	wg.Wait()
-	fmt.Println("All services online")
-	
-	select {}
+	select{}	
 }

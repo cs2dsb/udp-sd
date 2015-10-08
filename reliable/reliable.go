@@ -10,27 +10,28 @@ import (
 )
 
 const (
-	keepalive_timeout = time.Second * 5
+	keepalive_timeout = time.Millisecond * 500
 	default_retries = 5	
 	default_packet_timeout = time.Millisecond * 800
 	default_connection_timeout = time.Millisecond * 10000
 	incoming_buffer_length = 64*1024	
-	tight_loop_delay = time.Millisecond * 100		
+	tight_loop_delay = time.Millisecond * 1		
 	
 	rtt_packet_history = 10
 	rtt_thresh_high = time.Millisecond * 800
 	rtt_thresh_low = time.Millisecond * 250
-	rtt_thresh_check_min_packets = 5
+	rtt_thresh_check_min_packets = 10
 	
-	dispatch_queue_quality_levels = 10
-	dispatch_queue_quality_max = time.Millisecond * 1000 / 20
-	dispatch_queue_quality_min = time.Millisecond * 1000
-	dispatch_queue_quality_step = (dispatch_queue_quality_min - dispatch_queue_quality_max)/dispatch_queue_quality_levels
-	dispatch_queue_quality_resolution = 24
+	dispatch_quality_levels = 15
+	dispatch_quality_default_level = 3
+	dispatch_quality_max = time.Millisecond * 1000 / 100
+	dispatch_quality_min = time.Millisecond * 1000
+	dispatch_quality_step = (dispatch_quality_min - dispatch_quality_max)/dispatch_quality_levels
+	dispatch_quality_poll_delay = dispatch_quality_max / 2
 )
 
 func init() {
-	fmt.Printf("Max dispatch: %v, Min dispatch: %v, Step: %v\n", dispatch_queue_quality_max, dispatch_queue_quality_min, dispatch_queue_quality_step)
+	fmt.Printf("Max dispatch: %v, Min dispatch: %v, Step: %v\n", dispatch_quality_max, dispatch_quality_min, dispatch_quality_step)
 }
 
 var interfaces []*net.Interface
@@ -358,7 +359,7 @@ func (c *con) sendKeepalives() {
 }
 
 func (c *con) dispatchPackets() {
-	tick := time.NewTicker(dispatch_queue_quality_max)
+	tick := time.NewTicker(dispatch_quality_poll_delay)
 	
 	for {
 		select {
@@ -390,7 +391,7 @@ func (c *con) handlePackets(incomingPackets chan *encodedPacket) {
 		
 		c.Infof("Reassembled packet: %v", pkt)
 		c.ackIfNecessary(pkt)
-		c.updatePeerWithPacket(pkt.Peer, pkt)
+		pkt.Peer.updatePeerWithPacket(pkt)
 		
 		if pkt.OpCode & opData == opData {
 			select {
@@ -402,18 +403,6 @@ func (c *con) handlePackets(incomingPackets chan *encodedPacket) {
 	}
 	c.Infof("Incoming packet channel closed, handler function exiting")
 }
-
-func (c *con) updatePeerWithPacket(peer *peer, pkt *packet) {
-	peer.lastAck = time.Now()
-	
-	acks := pkt.ackList()
-	for _, a := range acks {
-		peer.ackPacket(a)
-	}
-	
-	peer.updateRemoteSeq(pkt.Seq)
-}
-
 
 func waitUntilTrue(test func() bool, wait time.Duration) bool {
 	w := time.Millisecond * 200

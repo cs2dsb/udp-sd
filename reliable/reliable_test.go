@@ -645,7 +645,6 @@ func TestPeerSendData(t *testing.T) {
 }
 
 func TestPacketsDroppedAfterRetriesExpired(t *testing.T) {
-	return
 	r1, err := NewReliableConnection()
 	if err != nil {
 		t.Errorf("NewReliableConnection() returned error: %q", err)		
@@ -735,3 +734,27 @@ func BenchmarkPacketToBytes(b *testing.B) {
 	
 	garbage = bytes
 }
+
+func BenchmarkPacketFromBytes(b *testing.B) {	
+	p := NewPeer(nil, &dummyCon{})
+	pkt := newPacket(p, []byte("hello hello hello"), opData)
+	
+	ep := encodedPacket{ 
+		Peer: p,
+		Payload: pkt.toBytes(),
+	}
+	
+	for i := 0; i < b.N; i++ {
+		pkt, _ = ep.toOutgoingPacket()
+	}
+	
+	garbage = pkt
+}
+
+func BenchmarkFindPeer(b *testing.B) {
+	r1, _ := NewReliableConnection()
+	for i := 0; i < b.N; i++ {
+		garbage = r1.FindOrAddPeer(&net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: 9999 })
+	}
+}
+

@@ -16,7 +16,7 @@ type peer struct {
 	UnAckedPackets map[uint32]*packet
 	packetTimeout time.Duration
 	connectionTimeout time.Duration
-	connection conInterface
+	connection Connection
 	outgoingPackets chan *packet
 	closed bool
 	done chan struct{}
@@ -26,7 +26,7 @@ type peer struct {
 	rttChan chan time.Duration
 }
 
-func NewPeer(address *net.UDPAddr, c conInterface) *peer {
+func NewPeer(address *net.UDPAddr, c Connection) *peer {
 	p := &peer{}
 	p.Address = address
 	p.Seq = 1
@@ -43,6 +43,17 @@ func NewPeer(address *net.UDPAddr, c conInterface) *peer {
 	go p.rttMonitor()
 	
 	return p
+}
+
+type Peer interface {
+	SendData(payload []byte)
+	IsAlive(wait time.Duration) bool
+	Equal(p2 Peer) bool
+	GetAddress() *net.UDPAddr
+}
+
+func (p *peer) GetAddress() *net.UDPAddr {
+	return p.Address
 }
 
 func (p *peer) Disconnect() {
@@ -280,7 +291,16 @@ func (p *peer) keepalive(now time.Time) {
 	p.connection.sendKeepaliveToPeer(p)
 }
 
-
+func (p *peer) Equal(p2 Peer) bool {
+	if p == nil || p2 == nil {
+		return false
+	}
+	p2Addr := p2.GetAddress()
+	if p2Addr == nil || p.Address == nil {
+		return false
+	}
+	return p.Address.IP.Equal(p2Addr.IP) && p.Address.Port == p2Addr.Port
+}
 
 
 

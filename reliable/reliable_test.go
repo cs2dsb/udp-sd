@@ -7,6 +7,7 @@ import (
 	"sync"
 	"strconv"
 	"testing"
+	"github.com/cs2dsb/udp-sd/util"
 )
 
 func TestEstablishConnection(t *testing.T) {
@@ -445,6 +446,22 @@ func (c *dummyCon) getPacketTimeout() time.Duration {
 	return time.Second
 }
 
+func (c *dummyCon) FindOrAddPeer(address *net.UDPAddr) *peer {
+	return nil
+}
+
+func (c *dummyCon) GetIncomingPacketChannel() chan *packet {
+	return nil
+}
+
+func (c *dummyCon) GetListenAddresses() []*net.UDPAddr {
+	return nil
+}
+
+func (c *dummyCon) GetPeerList() []*peer {
+	return nil
+}
+
 func TestPeerDispatchesPackets(t *testing.T) {
 	c := &dummyCon{
 		sendPacketChan: make(chan *packet),
@@ -467,7 +484,7 @@ func TestPeerDispatchesPackets(t *testing.T) {
 	}()
 	
 	go func() {
-		ok := waitUntilTrue(func() bool {
+		ok := util.WaitUntilTrue(func() bool {
 			return got == n
 		}, time.Second * 10)
 		if !ok {
@@ -558,7 +575,7 @@ func TestPacketRetrying(t *testing.T) {
 		time.Sleep(tight_loop_delay)
 	}
 	
-	ok := waitUntilTrue(func () bool {
+	ok := util.WaitUntilTrue(func () bool {
 		return len(p.UnAckedPackets) == 0
 	}, p.connectionTimeout * 2)
 	
@@ -703,7 +720,7 @@ func TestPacketsDroppedAfterRetriesExpired(t *testing.T) {
 	packet := newPacketWithRetries(p, buf, retries, opData)
 	r1.queuePacketForSend(packet)
 	
-	ok := waitUntilTrue(func () bool {
+	ok := util.WaitUntilTrue(func () bool {
 		return len(p.UnAckedPackets) == 0 || gotPacketCount >= retries
 	}, p.connectionTimeout * 2)
 	

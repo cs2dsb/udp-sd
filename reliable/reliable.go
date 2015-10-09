@@ -7,6 +7,7 @@ import (
 	"time"
 	"golang.org/x/net/ipv4"
 	"github.com/Sirupsen/logrus"
+	"github.com/cs2dsb/udp-sd/util"
 )
 
 const (
@@ -34,8 +35,6 @@ func init() {
 	fmt.Printf("Max dispatch: %v, Min dispatch: %v, Step: %v\n", dispatch_quality_max, dispatch_quality_min, dispatch_quality_step)
 }
 
-var interfaces []*net.Interface
-
 type con struct {
 	done chan struct{}	
 	online AtomicBool
@@ -53,11 +52,70 @@ type con struct {
 	listenAddress *net.UDPAddr
 }
 
-type conInterface interface {
+type Connection interface {
 	sendPacket(p *packet)
 	sendKeepaliveToPeer(p *peer)
 	getConnectionTimeout() time.Duration
 	getPacketTimeout() time.Duration
+	FindOrAddPeer(address *net.UDPAddr) *peer
+	GetPeerList() []*peer
+	GetListenAddresses() []*net.UDPAddr
+	GetIncomingPacketChannel() chan *packet
+}
+
+func (c *con) GetListenAddresses() (addresses []*net.UDPAddr) {			
+	addresses = make([]*net.UDPAddr, 0)
+	if !c.online.Get() {
+		return
+	}
+	
+	port := c.Port
+	
+	interfaces := util.GetUnicastInterfaces()
+	ips := make([]net.IP, 0)	
+	for _, ifc := range interfaces {
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			c.Warnf("Error getting addresses from interface (%v): %v", ifc, err)
+			continue
+		}
+		for _, a := range addrs {
+			var ip net.IP
+        	switch v := a.(type) {
+		        case *net.IPNet:
+	                ip = v.IP
+        		case *net.IPAddr:
+        	        ip = v.IP
+				default:
+					continue
+	        }
+			
+			
+			if ip.To4() == nil {
+				continue
+			}
+			found := false
+			for _, oldA := range ips {
+				if ip.Equal(oldA) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				ips = append(ips, ip)
+			}
+		}
+	}
+	
+	for _, ip := range ips {
+		addresses = append(addresses, &net.UDPAddr{ IP: ip, Port: port })
+	}
+	
+	return
+}
+
+func (c *con) GetIncomingPacketChannel() chan *packet {
+	return c.IncomingPackets
 }
 
 func (c *con) getConnectionTimeout() time.Duration {
@@ -255,6 +313,14 @@ func (c *con) getEnumeratePeersChan() *enumeratePeersRequest {
 	return req
 }
 
+func (c *con) GetPeerList() []*peer {
+	peers := make([]*peer, 0)
+	for p := range c.getEnumeratePeersChan().RespChan {
+		peers = append(peers, p)
+	}
+	return peers
+}
+
 func (c *con) sweepPackets() {
 	defer close(c.FailedOutgoingPackets)
 	for c.online.Get() {		
@@ -404,18 +470,6 @@ func (c *con) handlePackets(incomingPackets chan *encodedPacket) {
 	c.Infof("Incoming packet channel closed, handler function exiting")
 }
 
-func waitUntilTrue(test func() bool, wait time.Duration) bool {
-	w := time.Millisecond * 200
-	for wait > 0 {
-		if test() {
-			return true
-		}
-		wait -= w
-		time.Sleep(w)
-	}
-	return test()
-}
-
 func (c *con) ackIfNecessary(p *packet) {
 	if p.OpCode & opReliable == opReliable {		
 		c.Infof("Acking packet: %v", p)
@@ -521,23 +575,4 @@ func newReliableConnectionWithListenerHandlers(c *con, handlePackets func(incomi
 func NewReliableConnection() (*con, error) {
 	c := &con{}	
 	return newReliableConnectionWithListenerHandlers(c, c.handlePackets, c.dispatchPackets)
-}
-
-func getViableInterfaces() []*net.Interface {
-	if len(interfaces) == 0 {
-		allInterfaces, err := net.Interfaces()
-		if err != nil {
-			panic(err)
-		}
-		
-		interfaces := make([]*net.Interface, 0)
-		
-		for _, ifc:= range allInterfaces {
-			if ifc.Flags & net.FlagUp == net.FlagUp && ifc.Flags & net.FlagMulticast == net.FlagMulticast {
-				interfaces = append(interfaces, &ifc)
-			}
-		}
-	}
-	
-	return interfaces
 }

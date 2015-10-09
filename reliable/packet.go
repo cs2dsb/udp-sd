@@ -29,6 +29,24 @@ type packet struct {
 	timestamp time.Time
 }
 
+type Packet interface {
+	GetPeer() Peer
+	GetPayload() []byte
+	IsData() bool
+}
+
+func (p *packet) GetPeer() Peer {
+	return p.Peer
+}
+
+func (p *packet) GetPayload() []byte {
+	return p.Payload
+}
+
+func (p *packet) IsData() bool {
+	return p.OpCode & opData == opData
+}
+
 func (p *packet) String() string {
 	pl := len(p.Payload)
 	return fmt.Sprintf("%s from %v with %d byte payload (Ack: %d, Seq: %d, AckBitfield:%d, Retries: %d)", p.OpCode, p.Peer, pl, p.Ack, p.Seq, p.AckBitfield, p.Retries)

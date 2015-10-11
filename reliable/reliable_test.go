@@ -159,7 +159,11 @@ func TestPacketKeepaliveIncreasesSeq(t *testing.T) {
 	s := p.Seq
 	r1.sendKeepaliveToPeer(p)
 	
-	if p.Seq < s + 1 {
+	ok := util.WaitUntilTrue(func() bool {
+		return p.Seq > s + 1
+	}, r1.packetTimeout * 2)
+	
+	if !ok {
 		t.Errorf("Peer's Seq didn't increment after send keepalive")
 	}
 	

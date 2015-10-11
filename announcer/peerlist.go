@@ -96,8 +96,7 @@ func (pl *peerList) addOrUpdateAnnouncePeer(peer *announcePeer) {
 	defer pl.peerMut.Unlock()
 	
 	for _, p := range pl.Peers {
-		if p.Equals(peer) {
-			
+		if p.Equals(peer) {			
 			for _, newAddr := range peer.Addresses {
 				found := false 
 				for _, oldAddr := range p.Addresses {
@@ -122,6 +121,10 @@ func (pl *peerList) addOrUpdateAnnouncePeer(peer *announcePeer) {
 				if !found {
 					p.ServicesOffered = append(p.ServicesOffered, newService)
 				}
+			}
+			
+			if uuid.Equal(p.Id, uuid.Nil) {
+				p.Id = peer.Id
 			}
 			
 			return

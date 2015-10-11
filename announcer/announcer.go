@@ -106,22 +106,22 @@ func (a *announcer) runAnnounceRound() error {
 		return fmt.Errorf("Don't have any peers to advertise to")
 	}
 	
-	announcePeers := a.peers.getRandomPeers(announce_peer_list_max, targetPeers, peerHasId)
-	if len(announcePeers) == 0 {
-		return fmt.Errorf("Don't have anything to advertise to peers")
-	}
-	
-	payload, err := announcePeers.toBytes()
-	if err != nil {
-		return err
-	}
-	
-	for _, p := range targetPeers {
-		for _, addr := range p.Addresses {
-			udpPeer := a.unicastConnection.FindOrAddPeer(addr)
-			log.Infof("Sending (%v) to (%v)", announcePeers, addr)
-			a.announceToPeer(udpPeer, payload)
+	for _, target := range targetPeers {
+		announcePeers := a.peers.getRandomPeers(announce_peer_list_max, announcePeerList { target }, peerHasId)
+		if len(announcePeers) == 0 {
+			return fmt.Errorf("Don't have anything to advertise to peers")
 		}
+		
+		payload, err := announcePeers.toBytes()
+		if err != nil {
+			return err
+		}
+		
+		for _, addr := range target.Addresses {
+			udpPeer := a.unicastConnection.FindOrAddPeer(addr)
+			log.Infof("%v: Sending (%v) to (%v)", a.unicastConnection, announcePeers, addr)
+			a.announceToPeer(udpPeer, payload)
+		}		
 	}
 	return nil
 }

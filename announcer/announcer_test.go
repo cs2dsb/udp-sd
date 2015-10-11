@@ -159,7 +159,7 @@ func TestPeersFindOutAboutEachOtherViaThirdParty(t *testing.T) {
 	if !ok {
 		t.Fatalf("Announcer didn't receive announcements within 5 seconds")
 	}
-	
+		
 	ok = util.WaitUntilTrue(func() bool {
 		return len(a1.peers.Peers) == 3 && len(a3.peers.Peers) == 3
 	}, time.Second * 5)

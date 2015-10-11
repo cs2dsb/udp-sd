@@ -663,30 +663,19 @@ func TestDeadPeerGetsDropped(t *testing.T) {
 	
 	r2.Close()
 	
-	wait := r1.connectionTimeout * 2
-	w := time.Millisecond * 500
-	found := false
-	for wait > 0 {
-		found = false
+	ok := util.WaitUntilTrue(func() bool {
 		enumReq := r1.getEnumeratePeersChan()
 		for p2 := range enumReq.RespChan {
 			if p2 == p {
-				found = true
 				close(enumReq.AbortChan)
-				break
+				return false
 			}
 		}
-		
-		if found {
-			r1.sendKeepaliveToPeer(p)
-			wait -= w
-			time.Sleep(w)
-		} else {
-			wait = 0
-		}
-	}
-	if found {
-		t.Errorf("peer was not removed after 2 * connection timeout")
+		return true
+	}, r1.connectionTimeout * 3)
+	
+	if !ok {
+		t.Errorf("peer was not removed after 3 * connection timeout")
 	}
 	r1.Close()
 }

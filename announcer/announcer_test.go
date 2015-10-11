@@ -103,3 +103,68 @@ func TestAnnouncersCanCommunicate(t *testing.T) {
 		t.Fatalf("Announcer didn't receive announcement within 5 seconds")
 	}
 }
+
+func TestPeersFindOutAboutEachOtherViaThirdParty(t *testing.T) {
+	a1, _, err := getAnnouncer()
+	if err != nil {
+		t.Fatal(err)		
+	}
+	
+	a2, p2, err := getAnnouncer()
+	if err != nil {
+		t.Fatal(err)			
+	}
+	
+	a3, _, err := getAnnouncer()
+	if err != nil {
+		t.Fatal(err)			
+	}
+	
+	if len(a1.peers.Peers) != 1 {
+		t.Fatalf("Announcer had %d peers, expected 1", len(a1.peers.Peers))		
+	}
+	
+	if len(a2.peers.Peers) != 1 {
+		t.Fatalf("Announcer had %d peers, expected 1", len(a2.peers.Peers))
+	}
+	
+	if len(a3.peers.Peers) != 1 {
+		t.Fatalf("Announcer had %d peers, expected 1", len(a3.peers.Peers))
+	}
+	
+	a1.addPeer(p2.Addresses[0])
+	err = a1.runAnnounceRound()
+	if err != nil {
+		t.Fatalf("Error from runAnnounceRound: %v", err)
+	}
+	
+	if len(a1.peers.Peers) != 2 {
+		t.Fatalf("Announcer had %d peers, expected 2", len(a1.peers.Peers))
+	}
+	
+	a3.addPeer(p2.Addresses[0])
+	err = a3.runAnnounceRound()
+	if err != nil {
+		t.Fatalf("Error from runAnnounceRound: %v", err)
+	}
+	
+	if len(a3.peers.Peers) != 2 {
+		t.Fatalf("Announcer had %d peers, expected 2", len(a3.peers.Peers))
+	}
+	
+	ok := util.WaitUntilTrue(func() bool {
+		return len(a2.peers.Peers) == 3
+	}, time.Second * 5)
+	
+	if !ok {
+		t.Fatalf("Announcer didn't receive announcements within 5 seconds")
+	}
+	
+	ok = util.WaitUntilTrue(func() bool {
+		return len(a1.peers.Peers) == 3 && len(a3.peers.Peers) == 3
+	}, time.Second * 5)
+	
+	if !ok {
+		t.Fatalf("Announcers didn't recieve announcements about peers via 3rd party within 5 seconds")
+	}
+}

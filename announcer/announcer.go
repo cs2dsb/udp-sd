@@ -89,7 +89,7 @@ func addProtocolId(buf []byte) error {
 }
 
 func (a *announcer) periodicAnnounce() {	
-	for a.listening {
+	for a.unicastConnection.IsOnline() {
 		time.Sleep(announce_interval)
 		
 		a.runAnnounceRound()

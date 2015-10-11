@@ -1,6 +1,8 @@
 package reliable
 
 import (
+	"math/rand"
+	"fmt"
 	"encoding/binary"
 	"time"
 	"net"
@@ -18,7 +20,7 @@ func TestEstablishConnection(t *testing.T) {
 	if r == nil {
 		t.Errorf("NewReliableConnection() returned nil connection")
 	}
-	r.Stop()
+	r.Close()
 }
 
 func TestEstablishMultipleConnections(t *testing.T) {
@@ -38,8 +40,8 @@ func TestEstablishMultipleConnections(t *testing.T) {
 		t.Errorf("NewReliableConnection() returned nil connection on 2nd invocation")
 	}
 	
-	r1.Stop()
-	r2.Stop()
+	r1.Close()
+	r2.Close()
 }
 
 func TestConnectPeer(t *testing.T) {
@@ -69,8 +71,8 @@ func TestConnectPeer(t *testing.T) {
 		t.Errorf("peer.IsAlive(2000ms) returned false")
 	}	
 	
-	r1.Stop()
-	r2.Stop()
+	r1.Close()
+	r2.Close()
 }
 
 func TestPacketEncodeDecode(t *testing.T) {
@@ -157,12 +159,12 @@ func TestPacketKeepaliveIncreasesSeq(t *testing.T) {
 	s := p.Seq
 	r1.sendKeepaliveToPeer(p)
 	
-	if p.Seq != s + 1 {
+	if p.Seq < s + 1 {
 		t.Errorf("Peer's Seq didn't increment after send keepalive")
 	}
 	
-	r1.Stop()
-	r2.Stop()
+	r1.Close()
+	r2.Close()
 }
 
 func TestPacketGetsAcked(t *testing.T) {
@@ -190,22 +192,23 @@ func TestPacketGetsAcked(t *testing.T) {
 	packet := newPacketWithRetries(p, nil, 0, opPing)
 	r1.queuePacketForSend(packet)
 	
-	s := packet.Seq
-	if s == 0 {
-		t.Errorf("Queued packet has 0 sequence number")
-	}
+	ok := util.WaitUntilTrue(func() bool {
+		return p.GetPacketIsPacketUnacked(packet)
+	}, time.Millisecond * 2000)
 	
-	_, ok := p.UnAckedPackets[s]
 	if !ok {
-		t.Errorf("Queued packet missing from unacked packets map")
+		t.Errorf("Queued packet missing from unacked packets")
 	}
 	
-	ok = p.waitForAck(s, time.Millisecond * 2000)
+	ok = util.WaitUntilTrue(func() bool {
+		return !p.GetPacketIsPacketUnacked(packet)
+	}, time.Millisecond * 2000)
+	
 	if !ok {
 		t.Errorf("Packet not acked after 2 seconds")
 	}
-	r1.Stop()
-	r2.Stop()
+	r1.Close()
+	r2.Close()
 }
 
 func TestKeepAliveGetsSent(t *testing.T) {
@@ -234,8 +237,8 @@ func TestKeepAliveGetsSent(t *testing.T) {
 	if !ok {
 		t.Errorf("Packet not acked after 2 seconds")
 	}
-	r1.Stop()
-	r2.Stop()
+	r1.Close()
+	r2.Close()
 }
 
 func parseBitfield(t *testing.T, bitfield string) uint32 {
@@ -246,7 +249,7 @@ func parseBitfield(t *testing.T, bitfield string) uint32 {
 	return uint32(i)
 }
 
-func compareAckLists(t *testing.T, expected, actual []uint32) {
+func compareAckLists(expected, actual []uint32) error {
 	for i := len(expected) - 1; i >= 0; i-- {
 		ev := expected[i]
 		for j := len(actual) - 1; j >= 0; j-- {
@@ -258,12 +261,21 @@ func compareAckLists(t *testing.T, expected, actual []uint32) {
 			}
 		}
 	}
+	ret := ""
 	if len(expected) > 0 {
-		t.Errorf("Expected Ack values missing (%v) from actual", expected)
+		ret += fmt.Sprintf("Expected Ack values missing (%v) from actual", expected)
 	}
 	if len(actual) > 0 {
-		t.Errorf("Unexpected Ack values in actual (%v)", actual)
+		if len(ret) > 0 {
+			ret += "\n"
+		}
+		ret += fmt.Sprintf("Unexpected Ack values in actual (%v)", actual)
 	}
+	
+	if len(ret) > 0 {
+		return fmt.Errorf(ret)
+	}
+	return nil
 }
 
 func TestAckList(t *testing.T) {
@@ -271,29 +283,50 @@ func TestAckList(t *testing.T) {
 	op.Ack = 97	
 	
 	op.AckBitfield = uint32(parseBitfield(t, "00000000000000000000000000000000"))
-	compareAckLists(t, []uint32{op.Ack}, op.ackList())
+	err := compareAckLists([]uint32{op.Ack}, op.ackList())
+	if err != nil {
+		t.Error(err)
+	}
 	
 	op.AckBitfield = uint32(parseBitfield(t, "00000000000000000000000000000001"))
-	compareAckLists(t, []uint32{op.Ack, op.Ack - 1}, op.ackList())
+	err = compareAckLists([]uint32{op.Ack, op.Ack - 1}, op.ackList())
+	if err != nil {
+		t.Error(err)
+	}
 	
 	op.AckBitfield = uint32(parseBitfield(t, "00000000000000000000000000000010"))
-	compareAckLists(t, []uint32{op.Ack, op.Ack - 2}, op.ackList())
+	err = compareAckLists([]uint32{op.Ack, op.Ack - 2}, op.ackList())
+	if err != nil {
+		t.Error(err)
+	}
 	
 	op.AckBitfield = uint32(parseBitfield(t, "00000000000000000000000000000100"))
-	compareAckLists(t, []uint32{op.Ack, op.Ack - 3}, op.ackList())
+	err = compareAckLists([]uint32{op.Ack, op.Ack - 3}, op.ackList())
+	if err != nil {
+		t.Error(err)
+	}
 	
 	op.AckBitfield = uint32(parseBitfield(t, "00000000000000000000000000000111"))
-	compareAckLists(t, []uint32{op.Ack, op.Ack - 3, op.Ack - 2, op.Ack - 1}, op.ackList())
+	err = compareAckLists([]uint32{op.Ack, op.Ack - 3, op.Ack - 2, op.Ack - 1}, op.ackList())
+	if err != nil {
+		t.Error(err)
+	}
 	
 	op.AckBitfield = uint32(parseBitfield(t, "10000000000000000000000000000111"))
-	compareAckLists(t, []uint32{op.Ack, op.Ack - 32, op.Ack - 3, op.Ack - 2, op.Ack - 1}, op.ackList())
+	err = compareAckLists([]uint32{op.Ack, op.Ack - 32, op.Ack - 3, op.Ack - 2, op.Ack - 1}, op.ackList())
+	if err != nil {
+		t.Error(err)
+	}
 	
 	op.AckBitfield = uint32(parseBitfield(t, "11111111111111111111111111111111"))
 	list := []uint32{op.Ack}
 	for i := uint32(1); i <= 32; i++ {
 		list = append(list, op.Ack - i)
 	}
-	compareAckLists(t, list, op.ackList())
+	err = compareAckLists(list, op.ackList())
+	if err != nil {
+		t.Error(err)
+	}
 }
 
 func TestPeerUpdateRemoteSeq(t *testing.T) {
@@ -361,6 +394,232 @@ func TestPeerUpdateRemoteSeq(t *testing.T) {
 	expected = parseBitfield(t, "00000000000000000000000000011111")
 	if p.AckBitfield != expected {
 		t.Errorf("Expected bitfield %s, got %s", strconv.FormatUint(uint64(expected), 2), strconv.FormatUint(uint64(p.AckBitfield), 2))
+	}	
+}
+
+func mergeAckLists(a, b []uint32) []uint32 {
+	for _, v := range b {
+		found := false
+		for _, v2 := range a {
+			if v == v2 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			a = append(a, v)
+		}
+	}
+	
+	return a
+}
+
+func TestAckListOutOfOrder(t *testing.T) {
+	p := NewPeer(nil, &dummyCon{}) 
+	pkt := &packet{}
+	
+	if p.Seq != 1 {
+		t.Fatalf("Unexpected initial peer Seq of %d, expected 1", p.Seq)
+	}
+	
+	expectedAcks := []uint32{1, 2, 4, 5, 7, 8, 10}
+	for _, s := range expectedAcks {
+		p.updateRemoteSeq(s)
+	}
+	pkt.Ack = p.RemoteSeq
+	pkt.AckBitfield = p.AckBitfield
+	
+	err := compareAckLists(expectedAcks, pkt.ackList())
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	oooAcks := []uint32{6, 9}
+	for _, s := range oooAcks {
+		p.updateRemoteSeq(s)
+	}
+	expectedAcks = mergeAckLists(expectedAcks, oooAcks)
+	pkt.Ack = p.RemoteSeq
+	pkt.AckBitfield = p.AckBitfield
+	
+	err = compareAckLists(expectedAcks, pkt.ackList())
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	oooAcks = []uint32{11, 3, 12, 4, 11, 13}
+	for _, s := range oooAcks {
+		p.updateRemoteSeq(s)	
+	}
+	expectedAcks = mergeAckLists(expectedAcks, oooAcks)
+	pkt.Ack = p.RemoteSeq
+	pkt.AckBitfield = p.AckBitfield
+	
+	err = compareAckLists(expectedAcks, pkt.ackList())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p.AckBitfield = 0
+	p.RemoteSeq = 0
+	
+	//The rest come from some random logged output from other tests (was a case that was failing)
+	oooAcks = []uint32{
+		13,
+		14,
+		15,
+		16,
+		17,
+		19,
+		20,
+		21,
+		22,
+		23,
+		24,
+		25,
+		26,
+		27,
+		28,
+		29,
+		30,
+		31,
+		32,
+		33,
+		34,
+		35,
+		36,
+		37,
+	}	
+
+	expectedAcks = []uint32{ 12, 10, 9, 7, 6 }
+	
+	binTo32 := func(str string) uint32 {
+		v, err := strconv.ParseUint(str, 2, 32)
+		if err != nil {
+			panic(err)
+		}
+		return uint32(v)
+	}
+	oooExpBefore := []uint32{
+		binTo32("10110110110"),
+		binTo32("101101101101"),
+		binTo32("1011011011011"),
+		binTo32("10110110110111"),
+		binTo32("101101101101111"),
+		binTo32("1011011011011111"),
+		binTo32("101101101101111110"),
+		binTo32("1011011011011111101"),
+		binTo32("10110110110111111011"),
+		binTo32("101101101101111110111"),
+		binTo32("1011011011011111101111"),
+		binTo32("10110110110111111011111"),
+		binTo32("101101101101111110111111"),
+		binTo32("1011011011011111101111111"),
+		binTo32("10110110110111111011111111"),
+		binTo32("101101101101111110111111111"),
+		binTo32("1011011011011111101111111111"),
+		binTo32("10110110110111111011111111111"),
+		binTo32("101101101101111110111111111111"),
+		binTo32("1011011011011111101111111111111"),
+		binTo32("10110110110111111011111111111111"),
+		binTo32("1101101101111110111111111111111"),
+		binTo32("11011011011111101111111111111111"),
+		binTo32("10110110111111011111111111111111"),
+	}
+	
+	oooExpAfter := []uint32{
+		binTo32("101101101101"),
+		binTo32("1011011011011"),
+		binTo32("10110110110111"),
+		binTo32("101101101101111"),
+		binTo32("1011011011011111"),
+		binTo32("101101101101111110"),
+		binTo32("1011011011011111101"),
+		binTo32("10110110110111111011"),
+		binTo32("101101101101111110111"),
+		binTo32("1011011011011111101111"),
+		binTo32("10110110110111111011111"),
+		binTo32("101101101101111110111111"),
+		binTo32("1011011011011111101111111"),
+		binTo32("10110110110111111011111111"),
+		binTo32("101101101101111110111111111"),
+		binTo32("1011011011011111101111111111"),
+		binTo32("10110110110111111011111111111"),
+		binTo32("101101101101111110111111111111"),
+		binTo32("1011011011011111101111111111111"),
+		binTo32("10110110110111111011111111111111"),
+		binTo32("1101101101111110111111111111111"),
+		binTo32("11011011011111101111111111111111"),
+		binTo32("10110110111111011111111111111111"),
+		binTo32("1101101111110111111111111111111"),
+	}
+	
+	p.AckBitfield = oooExpBefore[0]
+	p.RemoteSeq = 12
+	
+	for i, s := range oooAcks {
+		bfE := oooExpBefore[i]
+		bfA := oooExpAfter[i]
+		if p.AckBitfield != bfE {
+			t.Fatalf("Ack bitfield before was expected to be %d but was %d instead", bfE, p.AckBitfield)			
+		}
+		p.updateRemoteSeq(s)	
+		if p.AckBitfield != bfA {
+			t.Fatalf("%d: Ack bitfield after was expected to be %d but was %d instead", i, bfA, p.AckBitfield)
+		}
+	}
+	expectedAcks = mergeAckLists(expectedAcks, oooAcks)
+	pkt.Ack = p.RemoteSeq
+	pkt.AckBitfield = p.AckBitfield
+	
+	err = compareAckLists(expectedAcks, pkt.ackList())
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAckListFalsePositives(t *testing.T) {
+	p := NewPeer(nil, &dummyCon{})
+	pkt := &packet{}
+	
+	if p.Seq != 1 {
+		t.Fatalf("Unexpected initial peer Seq of %d, expected 1", p.Seq)
+	}
+	
+	expectedAcks := make([]uint32, 33)
+	
+	for seq := uint32(1); seq <= 1000; seq ++ {
+		r := rand.Intn(10)
+		if r == 0 {			
+			//Some lost packets
+			r = rand.Intn(3)
+			
+			for i := uint32(0); i < uint32(r) + 2; i++ {
+				expectedAcks[(seq + i - 1) % 33] = 0
+			}
+			seq += uint32(r)
+			continue
+		} 
+			
+		expectedAcks[(seq - 1) % 33] = seq
+		//fmt.Printf("%v\n", expectedAcks)
+		
+		p.updateRemoteSeq(seq)
+		
+		pkt.Ack = p.RemoteSeq
+		pkt.AckBitfield = p.AckBitfield
+
+		list := make([]uint32, 0)
+		for _, v := range expectedAcks {
+			if v != 0 {
+				list = append(list, v)
+			}
+		}	
+		err := compareAckLists(list, pkt.ackList())
+		if err != nil {
+			t.Error(err)
+			fmt.Println(err)
+		}
 	}
 }
 
@@ -383,6 +642,9 @@ func TestDeadPeerGetsDropped(t *testing.T) {
 		t.Errorf("NewReliableConnection() returned nil connection")
 	}
 	
+	r1.EnableKeepalive(false)
+	r2.EnableKeepalive(false)
+	
 	p := r1.FindOrAddPeer(&net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: r2.Port })
 	if p == nil {
 		t.Errorf("ConnectPeer() returned nil peer")
@@ -395,7 +657,7 @@ func TestDeadPeerGetsDropped(t *testing.T) {
 		t.Errorf("peer.IsAlive(2000ms) returned false")
 	}
 	
-	r2.Stop()
+	r2.Close()
 	
 	wait := r1.connectionTimeout * 2
 	w := time.Millisecond * 500
@@ -422,7 +684,7 @@ func TestDeadPeerGetsDropped(t *testing.T) {
 	if found {
 		t.Errorf("peer was not removed after 2 * connection timeout")
 	}
-	r1.Stop()
+	r1.Close()
 }
 
 
@@ -462,6 +724,14 @@ func (c *dummyCon) GetPeerList() []*peer {
 	return nil
 }
 
+func (c *dummyCon) IsOnline() bool {
+	return true
+}
+
+func (c *dummyCon) GetSweepInterval() time.Duration {
+	return time.Second
+}
+
 func TestPeerDispatchesPackets(t *testing.T) {
 	c := &dummyCon{
 		sendPacketChan: make(chan *packet),
@@ -472,7 +742,7 @@ func TestPeerDispatchesPackets(t *testing.T) {
 	go func() {
 		for i := 0; i < n; i++ {
 			pkt := newPacketWithRetries(p, nil, 0, opData)
-			p.queuePacketForSend(pkt)
+			p.SendPacket(pkt)
 		}
 	}()
 	
@@ -497,7 +767,7 @@ func TestPeerDispatchesPackets(t *testing.T) {
 		<- c.sendPacketChan		
 		got ++
 	}
-	p.Disconnect()
+	p.Close()
 }
 
 func TestPacketRetrying(t *testing.T) {
@@ -508,12 +778,14 @@ func TestPacketRetrying(t *testing.T) {
 	
 	r2 := &con{}	
 	
+	wait := r1.packetTimeout
+	
 	lossyHandler := func (incomingPackets chan *encodedPacket) {
 		innerChan := make(chan *encodedPacket)
 		defer close(innerChan)
 		go r2.handlePackets(innerChan)
 		
-		whoops := false
+		whoops := 2
 		for p := range incomingPackets {
 			pkt, err := p.toOutgoingPacket()
 			if err != nil {
@@ -522,15 +794,18 @@ func TestPacketRetrying(t *testing.T) {
 			}
 			if pkt.OpCode & opData == opData{
 				i, _ := binary.Uvarint(pkt.Payload)
-				whoops = !whoops
-				if whoops {
-					t.Logf("lossy handler dropping %d: %v", i, pkt)
+				whoops ++
+				if whoops % 3 == 0 {
+					fmt.Printf("lossy handler dropping %d: %v\n", i, pkt)
+					wait += r2.packetTimeout
 					continue
 				}
 				t.Logf("lossy handler passing on %d: %v", i, pkt)
 			}
 			innerChan <- p
 		}
+		
+		fmt.Println("lossy handler exiting")
 	}
 	
 	_, err = newReliableConnectionWithListenerHandlers(r2, lossyHandler, r2.dispatchPackets)
@@ -575,17 +850,23 @@ func TestPacketRetrying(t *testing.T) {
 		time.Sleep(tight_loop_delay)
 	}
 	
-	ok := util.WaitUntilTrue(func () bool {
-		return len(p.UnAckedPackets) == 0
-	}, p.connectionTimeout * 2)
+	ok := util.WaitUntilTrueWithVariableWait(func () bool {		
+		for _, v := range received {
+			if v == nil {
+				return false
+			}
+		}
+		return true
+	}, func() time.Duration {
+		return wait
+	})
 	
 	if !ok {
-		t.Errorf("peer had %d unacked packets after 2 * connection timeout", len(p.UnAckedPackets))
+		t.Errorf("We didn't receive our packets after %v", wait)
 	}
 	
-	time.Sleep(default_packet_timeout)
-	r1.Stop()
-	r2.Stop()	
+	r1.Close()
+	r2.Close()	
 	wg.Wait()
 	
 	for i := uint32(0); i < n; i++ {
@@ -657,14 +938,14 @@ func TestPeerSendData(t *testing.T) {
 		}
 	}
 	
-	r1.Stop()
-	r2.Stop()	
+	r1.Close()
+	r2.Close()	
 }
 
 func TestPacketsDroppedAfterRetriesExpired(t *testing.T) {
 	r1, err := NewReliableConnection()
 	if err != nil {
-		t.Errorf("NewReliableConnection() returned error: %q", err)		
+		t.Fatalf("NewReliableConnection() returned error: %q", err)		
 	}
 	
 	r2 := &con{}	
@@ -680,7 +961,7 @@ func TestPacketsDroppedAfterRetriesExpired(t *testing.T) {
 		for p := range incomingPackets {
 			pkt, err := p.toOutgoingPacket()
 			if err != nil {
-				t.Errorf("Error converting to outgoingPacket: %v", err)
+				t.Fatalf("Error converting to outgoingPacket: %v", err)
 				return
 			}
 			if pkt.OpCode & opData == opData && len(buf) == len(pkt.Payload){
@@ -703,17 +984,20 @@ func TestPacketsDroppedAfterRetriesExpired(t *testing.T) {
 	
 	_, err = newReliableConnectionWithListenerHandlers(r2, lossyHandler, r2.dispatchPackets)
 	if err != nil {
-		t.Errorf("newReliableConnectionWithListenerHandlers() returned error: %q", err)
+		t.Fatalf("newReliableConnectionWithListenerHandlers() returned error: %q", err)
 	}
+	
+	r1.packetTimeout = time.Millisecond * 200
+	r2.packetTimeout = time.Millisecond * 200
 	
 	p := r1.FindOrAddPeer(&net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: r2.Port })
 	if p == nil {
-		t.Errorf("ConnectPeer() returned nil peer")
+		t.Fatalf("ConnectPeer() returned nil peer")
 	}
 	
 	isAlive := p.IsAlive(time.Millisecond * 2000)
 	if !isAlive {
-		t.Errorf("peer.IsAlive(2000ms) returned false")
+		t.Fatalf("peer.IsAlive(2000ms) returned false")
 	}
 	
 	retries := uint32(4)
@@ -721,20 +1005,20 @@ func TestPacketsDroppedAfterRetriesExpired(t *testing.T) {
 	r1.queuePacketForSend(packet)
 	
 	ok := util.WaitUntilTrue(func () bool {
-		return len(p.UnAckedPackets) == 0 || gotPacketCount >= retries
+		return len(p.GetUnackedPacketList()) == 0 || gotPacketCount >= retries
 	}, p.connectionTimeout * 2)
 	
 	if !ok {
-		t.Errorf("peer had %d unacked packets after 2 * connection timeout and we didn't get the packet we were expecting the correct number of times", len(p.UnAckedPackets))
+		t.Fatalf("peer had %d unacked packets after 2 * connection timeout and we didn't get the packet we were expecting the correct number of times", len(p.GetUnackedPacketList()))
 	}
 	
 	if gotPacketCount != retries {
-		t.Errorf("We got the packet we wanted %d times, expected %d", gotPacketCount, retries)
+		t.Fatalf("We got the packet we wanted %d times, expected %d", gotPacketCount, retries)
 	}
 	
 	time.Sleep(default_packet_timeout)
-	r1.Stop()
-	r2.Stop()	
+	r1.Close()
+	r2.Close()	
 	
 }
 
@@ -775,3 +1059,43 @@ func BenchmarkFindPeer(b *testing.B) {
 	}
 }
 
+func TestPeerDispatchesPacketQuickly(t *testing.T) {
+	p := NewPeer(nil, &dummyCon{})
+	
+	var endTime time.Time
+	var wg sync.WaitGroup
+	wg.Add(1)
+	
+	myPacket := newPacket(p, []byte("fdjkljfkldjlfkd"), opData)
+	
+	go func() {
+		defer wg.Done()
+		
+		select {
+			case <- time.After(default_connection_timeout):
+				t.Fatalf("Didn't receive anything within connection timout")
+				return
+			case pkt := <- p.outgoingPackets:
+				if string(myPacket.Payload) != string(pkt.Payload) {
+					t.Fatalf("Received packet had a different payload. Got %v, expected %v", pkt.Payload, myPacket.Payload)
+					return
+				} else {
+					t.Logf("Got packet: %v", pkt)
+				}
+		}
+		
+		endTime = time.Now()
+	}()
+	
+	
+	startTime := time.Now()
+	p.SendPacket(myPacket)
+	wg.Wait()
+	
+	diff := endTime.Sub(startTime)
+	t.Logf("Dispatch took %v", diff)
+	
+	if diff > time.Millisecond * 10 {
+		t.Fatalf("Dispatch took over 100ms")
+	}
+}

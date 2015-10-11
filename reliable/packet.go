@@ -29,6 +29,33 @@ type packet struct {
 	timestamp time.Time
 }
 
+func (p *packet) Copy() *packet {
+	pkt := &packet {
+		Peer: p.Peer,
+		OpCode: p.OpCode,
+		Payload: p.Payload,
+		Retries: p.Retries,
+		RetriesUsed: p.RetriesUsed,
+		Seq: p.Seq,
+		Ack: p.Ack,
+		AckBitfield: p.AckBitfield,
+		timestamp: p.timestamp,
+	}
+	return pkt
+}
+
+func (p *packet) CreateAck() *packet {
+	pkt := &packet {		
+		Peer: p.Peer,
+		OpCode: opAck,
+		Retries: 0,
+		RetriesUsed: 0,
+		Ack: p.Seq,
+	}
+	
+	return pkt
+}
+
 type Packet interface {
 	GetPeer() Peer
 	GetPayload() []byte

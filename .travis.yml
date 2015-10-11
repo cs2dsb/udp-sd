@@ -1,10 +1,10 @@
 language: go
 go:
     - 1.5
-	- tip
+    - tip
 install:
-  - go get github.com/Sirupsen/logrus
-  - go get github.com/satori/go.uuid
+    - go get github.com/Sirupsen/logrus
+    - go get github.com/satori/go.uuid
 
 sudo: false
 notifications:

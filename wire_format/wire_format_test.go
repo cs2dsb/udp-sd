@@ -133,6 +133,9 @@ func Test_GetUniqueToken_Always_Unique(t *testing.T) {
 		}
 	}
 	
+	if len(seen) == 0 {
+		t.Fatalf("Didn't find any implementations of GetUniqueToken")
+	}
 }
 
 

@@ -6,12 +6,14 @@ import  (
 	"strings"
 	"strconv"
     "go/ast"
-    //"go/format"
     "go/parser"
     "go/token"
 	"os"
 	"path/filepath"
 	"io/ioutil"
+	"reflect"
+	"math/rand"
+	"time"
 )
 
 const (
@@ -66,71 +68,110 @@ func Test_Tests_Can_List_Package_Files(t *testing.T) {
 	}
 }
 
-func Test_GetUniqueToken_Always_Unique(t *testing.T) {	
+func enumerateAstNodesInPackage(iterator func(filename string, node ast.Node) bool) error {
 	packageRoot, err := getPackageFolderPath()
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
 	
 	files, err := ioutil.ReadDir(packageRoot)
 	if err != nil {
-		t.Fatalf("Error listing package root: %v", err)
+		return fmt.Errorf("Error listing package root: %v", err)
 	}
 	
 	fileSet := token.NewFileSet()
-	
-	seen := make(map[byte]bool)
 	
 	for _, f := range files {
 		if strings.HasSuffix(f.Name(), ".go") {
 			contents, err := ioutil.ReadFile(filepath.Join(packageRoot, f.Name()))
 			if err != nil {
-				t.Fatalf("Error reading contents of go file in package: %v", err)
+				return fmt.Errorf("Error reading contents of go file in package: %v", err)
 			}
 			
 			parsed, err := parser.ParseFile(fileSet, f.Name(), contents, 0)
 			if err != nil {
-				t.Fatalf("Error parsing source file %s: %v", f.Name(), err)
+				return fmt.Errorf("Error parsing source file %s: %v", f.Name(), err)
 			}
-						
+										
 			ast.Inspect(parsed, func(n ast.Node) bool {
-				switch x := n.(type) {
-					case *ast.FuncDecl:
-						if x.Name.String() == "GetUniqueToken" {
-							if len(x.Body.List) > 1 {
-								t.Fatalf("GetUniqueToken in %s has more than one statement (%d), expected just a return", f.Name(), len(x.Body.List))
-							}
-							rs, ok := x.Body.List[0].(*ast.ReturnStmt)
-							if !ok {
-								t.Fatalf("GetUniqueToken in %s had a single statement but it wasn't a return", f.Name())
-							}
-							if len(rs.Results) != 1 {
-								t.Fatalf("GetUniqueToken in %s returns %d results instead of 1", f.Name(), len(rs.Results))
-							}
-							vs, ok := rs.Results[0].(*ast.BasicLit)
-							if !ok {
-								t.Fatalf("GetUniqueToken in %s returns something that isn't a basic literal", f.Name())
-							}
-							if vs.Kind != token.INT {
-								t.Fatalf("GetUniqueToken in %s didn't return a token.INT", f.Name())
-							}
-							
-							asInt, err := strconv.ParseUint(vs.Value, 10, 8)
-							if err != nil {
-								t.Fatalf("GetUniqueToken in %s return value error parsing as uint: %v", err)
-							}
-							
-							b := byte(asInt)
-							_, ok = seen[b]
-							if ok {
-								t.Errorf("GetUniqueToken in %s returns %d which we've already seen", f.Name(), b)
-							}
-							seen[b] = true
-						}
-				}
-				return true
+				return iterator(f.Name(), n)
 			})
 		}
+	}
+	
+	return nil
+}
+
+func enumerateGetUniqueTokenResults(iterator func(name string, token byte) bool) error {
+	var innerError error
+	err := enumerateAstNodesInPackage(func(name string, n ast.Node) bool {
+		if innerError != nil {
+			return false
+		}
+		
+		switch x := n.(type) {
+			case *ast.FuncDecl:
+				if x.Name.String() == "GetUniqueToken" {
+					if len(x.Body.List) > 1 {
+						innerError = fmt.Errorf("GetUniqueToken in %s has more than one statement (%d), expected just a return", name, len(x.Body.List))
+						return false
+					}
+					rs, ok := x.Body.List[0].(*ast.ReturnStmt)
+					if !ok {
+						innerError = fmt.Errorf("GetUniqueToken in %s had a single statement but it wasn't a return", name)
+						return false
+					}
+					if len(rs.Results) != 1 {
+						innerError = fmt.Errorf("GetUniqueToken in %s returns %d results instead of 1", name, len(rs.Results))
+						return false
+					}
+					vs, ok := rs.Results[0].(*ast.BasicLit)
+					if !ok {
+						innerError = fmt.Errorf("GetUniqueToken in %s returns something that isn't a basic literal", name)
+						return false
+					}
+					if vs.Kind != token.INT {
+						innerError = fmt.Errorf("GetUniqueToken in %s didn't return a token.INT", name)
+						return false
+					}
+					
+					asInt, err := strconv.ParseUint(vs.Value, 10, 8)
+					if err != nil {
+						innerError = fmt.Errorf("GetUniqueToken in %s return value error parsing as uint: %v", err)
+						return false
+					}
+					
+					b := byte(asInt)
+					
+					return iterator(name, b)
+				}
+		}
+		return true
+	})
+	
+	if err != nil {
+		return err
+	}
+	if innerError != nil {
+		return innerError
+	}
+	return nil
+}
+
+func Test_GetUniqueToken_Always_Unique(t *testing.T) {	
+	seen := make(map[byte]bool)
+	
+	err := enumerateGetUniqueTokenResults(func(name string, token byte) bool {
+		_, ok := seen[token]
+		if ok {
+			t.Errorf("GetUniqueToken in %s returns %d which we've already seen", name, token)
+		}
+		seen[token] = true
+		return true
+	})		
+	
+	if err != nil {
+		t.Fatal(err)
 	}
 	
 	if len(seen) == 0 {
@@ -138,7 +179,126 @@ func Test_GetUniqueToken_Always_Unique(t *testing.T) {
 	}
 }
 
+func Test_Each_Unique_Serializable_Token_Has_Constructor_Registered(t *testing.T) {
+	err := enumerateGetUniqueTokenResults(func(name string, token byte) bool {
+		_, ok := serializableConstructors[token]
+		if !ok {
+			t.Errorf("Constructor missing for token %d found in file %s", token, name)
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
+func Test_Each_Serializable_Object_First_Byte_Matches_Token(t *testing.T) {
+	for token, sc := range serializableConstructors {
+		dummyChunk := &Chunk{
+			buffer: []byte{token},
+		}
+		ob := sc.SerializableConstructor(dummyChunk)
+		if ob == nil {
+			t.Errorf("Nil object returned by serializable constructor for token %d", token)
+			continue
+		}
+		
+		buf := ob.Serialize()
+		if len(buf) == 0 {
+			t.Errorf("0 len buffer returned by serialize method for token %d", token)
+			continue
+		}
+		
+		if buf[0] != token {
+			t.Errorf("First byte of buffer returned by serialize method for token %d was %d, expecting %d", token, buf[0], token)
+			continue
+		}
+	}
+}
+
+func Test_Each_Serializable_Objects_Public_Fields_Are_Preserved(t *testing.T) {
+	for token, sc := range serializableConstructors {
+		
+		dummyChunk := &Chunk{
+			buffer: []byte{token},
+		}
+		
+		newObject := sc.SerializableConstructor(dummyChunk)
+		if newObject == nil {
+			t.Errorf("Nil returned by serializable constructor for token %d", token)
+			continue
+		}
+		
+		ov := reflect.ValueOf(newObject).Elem()
+		err := randomizeStruct(ov)
+		if err != nil {
+			t.Fatalf("Error from randomizeStruct for token %d: %v", token, err)
+		}
+		
+		fmt.Println(newObject)
+	}
+}
+
+func randomizeStruct(aStruct reflect.Value) error {
+	if aStruct.Kind() != reflect.Struct {
+		return fmt.Errorf("Object passed to randomizeStruct was not a structure: %v", aStruct)
+	}
+	
+	for i := 0; i < aStruct.NumField(); i++ {
+		field := aStruct.Field(i)
+		fieldName := aStruct.Type().Field(i).Name
+		
+		if !field.CanSet() {
+			continue
+		}
+		
+		fKind := field.Kind()
+		switch fKind {
+			case reflect.Int64:
+				field.SetInt(randomInt())
+
+			case reflect.Float64:
+			field.SetFloat(randomFloat())
+			
+			case reflect.String:
+				field.SetString(randomString())
+		
+			case reflect.Struct:
+				val := field.Interface()
+				switch val.(type) {
+					case time.Time:
+						rTime := reflect.ValueOf(randomTime())
+						field.Set(rTime)
+					default:
+						err := randomizeStruct(field)
+						if err != nil {
+							return err
+						}
+				}								
+			
+			default:
+				return fmt.Errorf("Unsupported field type for field %s", fieldName)				
+		}
+	}
+		
+	return nil
+}
+
+func randomInt() int64 {
+	return rand.Int63()
+}
+
+func randomFloat() float64 {
+	return rand.Float64()
+}
+
+func randomString() string {
+	return strconv.FormatInt(randomInt(), 3)
+}
+
+func randomTime() time.Time {
+	return time.Unix(randomInt(), randomInt())
+}
 
 
 

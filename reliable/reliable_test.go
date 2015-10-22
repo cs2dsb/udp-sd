@@ -804,7 +804,7 @@ func TestPacketRetrying(t *testing.T) {
 	_, err = newReliableConnectionWithListenerHandlers(r2, lossyHandler, r2.dispatchPackets)
 	if err != nil {
 		t.Errorf("newReliableConnectionWithListenerHandlers() returned error: %q", err)
-	}
+	}	
 	
 	p := r1.FindOrAddPeer(&net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: r2.Port })
 	if p == nil {

@@ -194,10 +194,7 @@ func Test_Each_Unique_Serializable_Token_Has_Constructor_Registered(t *testing.T
 
 func Test_Each_Serializable_Object_First_Byte_Matches_Token(t *testing.T) {
 	for token, sc := range serializableConstructors {
-		dummyChunk := &Chunk{
-			buffer: []byte{token},
-		}
-		ob := sc.SerializableConstructor(dummyChunk)
+		ob := sc.SerializableConstructor(nil)
 		if ob == nil {
 			t.Errorf("Nil object returned by serializable constructor for token %d", token)
 			continue
@@ -218,12 +215,7 @@ func Test_Each_Serializable_Object_First_Byte_Matches_Token(t *testing.T) {
 
 func Test_Each_Serializable_Objects_Public_Fields_Are_Preserved(t *testing.T) {
 	for token, sc := range serializableConstructors {
-		
-		dummyChunk := &Chunk{
-			buffer: []byte{token},
-		}
-		
-		newObject := sc.SerializableConstructor(dummyChunk)
+		newObject := sc.SerializableConstructor(nil)
 		if newObject == nil {
 			t.Errorf("Nil returned by serializable constructor for token %d", token)
 			continue
@@ -232,10 +224,30 @@ func Test_Each_Serializable_Objects_Public_Fields_Are_Preserved(t *testing.T) {
 		ov := reflect.ValueOf(newObject).Elem()
 		err := randomizeStruct(ov)
 		if err != nil {
-			t.Fatalf("Error from randomizeStruct for token %d: %v", token, err)
+			t.Errorf("Error from randomizeStruct for token %d: %v", token, err)
+			continue
 		}
 		
-		fmt.Println(newObject)
+		bytes := newObject.Serialize()
+		if len(bytes) == 0 {
+			t.Errorf("Serialize returned 0 bytes for token %d", token)
+			continue
+		}
+		
+		sameObject := sc.SerializableConstructor(&Chunk{
+			buffer: bytes,
+		})
+		
+		if sameObject == nil {
+			t.Errorf("Serializable constructor returned nil reassembling object for token %d", token)
+			continue
+		}
+		
+		if !newObject.Equals(sameObject) {
+			t.Errorf("Reassembled object didn't match original for token %d: ORIGINAL: <%v>, REASSEMBLED: <%v>", token, newObject, sameObject)
+			continue
+		}
+		
 	}
 }
 
